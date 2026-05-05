@@ -18,6 +18,26 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def safe_json(r: httpx.Response):
+    """Parse a Kotak response defensively.
+
+    Returns (data, error). When the upstream returns an empty body or HTML
+    error page, r.json() raises json.JSONDecodeError("Expecting value: line 1
+    column 1 (char 0)") which is useless to the caller. This helper turns that
+    into a structured error containing the HTTP status and a body snippet so
+    the frontend can show what Kotak actually replied with.
+    """
+    text = (r.text or "").strip()
+    ctype = r.headers.get("content-type", "")
+    if not text:
+        return None, f"empty body (HTTP {r.status_code})"
+    try:
+        return r.json(), None
+    except (json.JSONDecodeError, ValueError):
+        snippet = text[:300].replace("\n", " ").replace("\r", " ")
+        return None, f"non-JSON body (HTTP {r.status_code}, content-type={ctype}): {snippet}"
+
 app = FastAPI(title="NEXUS Trading Bot v3")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -203,7 +223,9 @@ async def login(req: LoginRequest):
             r = await c.post(KOTAK_LOGIN_URL,
                 headers={"Authorization": req.access_token, "neo-fin-key": NEO_FIN_KEY, "Content-Type": "application/json"},
                 json={"mobileNumber": req.mobile, "ucc": req.ucc, "totp": req.totp})
-            d = r.json()
+            d, err = safe_json(r)
+            if err:
+                return {"success": False, "message": f"Kotak login: {err}"}
             if d.get("data", {}).get("token"):
                 return {"success": True, "view_token": d["data"]["token"], "view_sid": d["data"]["sid"]}
             return {"success": False, "message": d.get("message", "Login failed")}
@@ -218,7 +240,9 @@ async def validate(req: ValidateRequest):
                 headers={"Authorization": req.access_token, "neo-fin-key": NEO_FIN_KEY,
                          "sid": req.view_sid, "Auth": req.view_token, "Content-Type": "application/json"},
                 json={"mpin": req.mpin})
-            d = r.json()
+            d, err = safe_json(r)
+            if err:
+                return {"success": False, "message": f"Kotak validate: {err}"}
             if d.get("data", {}).get("token"):
                 sid = f"sess_{req.view_sid[-8:]}"
                 sessions[sid] = {
@@ -244,7 +268,10 @@ async def limits(req: SessionRequest):
                 headers={"Auth": sess["session_token"], "Sid": sess["session_sid"],
                          "neo-fin-key": NEO_FIN_KEY, "Content-Type": "application/x-www-form-urlencoded"},
                 data={"jData": json.dumps({"seg": "ALL", "exch": "ALL", "prod": "ALL"})})
-            return r.json()
+            data, err = safe_json(r)
+            if err:
+                return {"success": False, "error": err}
+            return data
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -267,7 +294,9 @@ async def get_ltp(req: QuoteRequest):
                 headers={"Auth": sess["session_token"], "Sid": sess["session_sid"],
                          "neo-fin-key": NEO_FIN_KEY, "Content-Type": "application/json"},
                 json=payload)
-            data = r.json()
+            data, err = safe_json(r)
+            if err:
+                return {"success": False, "instrument": req.instrument, "error": err}
             logger.info(f"LTP response for {req.instrument}: {data}")
             return {"success": True, "instrument": req.instrument, "data": data}
         except Exception as e:
@@ -291,16 +320,76 @@ async def get_ohlc(req: QuoteRequest):
                 headers={"Auth": sess["session_token"], "Sid": sess["session_sid"],
                          "neo-fin-key": NEO_FIN_KEY, "Content-Type": "application/json"},
                 json=payload)
-            data = r.json()
+            data, err = safe_json(r)
+            if err:
+                return {"success": False, "instrument": req.instrument, "error": err}
             logger.info(f"OHLC response for {req.instrument}: {data}")
             return {"success": True, "instrument": req.instrument, "data": data}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
 # ── FULL MARKET DATA (LTP + OHLC + VIX) — correct Kotak format ──────────────
+async def _fetch_quotes(c: httpx.AsyncClient, sess: dict, tokens: list):
+    """Try Kotak quote endpoints in order until one returns valid JSON.
+
+    Kotak NEO has shipped multiple quote shapes across account types:
+      1. /quotes       — JSON body, newer NEO accounts
+      2. /quick/quotes — form-encoded jData, older NEO accounts
+    We try the JSON form first because the form-encoded path on the older URL
+    returns an empty body on several account variants (root cause of the
+    "Expecting value: line 1 column 1 (char 0)" error in the LOG tab).
+    Returns (raw_data, debug_info_dict).
+    """
+    base = sess["base_url"].rstrip("/")
+    headers_common = {
+        "Auth": sess["session_token"],
+        "Sid":  sess["session_sid"],
+        "neo-fin-key": NEO_FIN_KEY,
+    }
+
+    attempts = []
+
+    # Attempt 1: JSON body to /quotes
+    body_json = {
+        "instrument_tokens": tokens,
+        "quote_type": "",
+        "isIndex": True,
+        "isDepth": False,
+    }
+    try:
+        r1 = await c.post(
+            f"{base}/quotes",
+            headers={**headers_common, "Content-Type": "application/json"},
+            json=body_json,
+        )
+        data, err = safe_json(r1)
+        attempts.append({"url": "/quotes", "status": r1.status_code, "error": err})
+        if data is not None:
+            return data, {"endpoint": "/quotes", "attempts": attempts}
+    except httpx.HTTPError as e:
+        attempts.append({"url": "/quotes", "error": f"transport: {e}"})
+
+    # Attempt 2: form-encoded jData to /quick/quotes
+    jData = json.dumps(body_json)
+    try:
+        r2 = await c.post(
+            f"{base}/quick/quotes",
+            headers={**headers_common, "Content-Type": "application/x-www-form-urlencoded"},
+            data={"jData": jData},
+        )
+        data, err = safe_json(r2)
+        attempts.append({"url": "/quick/quotes", "status": r2.status_code, "error": err})
+        if data is not None:
+            return data, {"endpoint": "/quick/quotes", "attempts": attempts}
+    except httpx.HTTPError as e:
+        attempts.append({"url": "/quick/quotes", "error": f"transport: {e}"})
+
+    return None, {"endpoint": None, "attempts": attempts}
+
+
 @app.post("/quotes/market_data")
 async def get_market_data(req: QuoteRequest):
-    """Real LTP, OHLC, change% from Kotak NEO API using correct form-encoded format"""
+    """Real LTP, OHLC, change% from Kotak NEO API with endpoint fallback."""
     sess = get_session(req.session_id)
     inst = INSTRUMENT_TOKENS.get(req.instrument.upper())
     vix  = INSTRUMENT_TOKENS["VIX"]
@@ -309,28 +398,23 @@ async def get_market_data(req: QuoteRequest):
 
     async with httpx.AsyncClient(timeout=20) as c:
         try:
-            # Kotak NEO quotes endpoint — uses form-encoded jData
-            jData = json.dumps({
-                "instrument_tokens": [
-                    {"instrument_token": inst["instrument_token"], "exchange_segment": inst["exchange_segment"]},
-                    {"instrument_token": vix["instrument_token"],  "exchange_segment": vix["exchange_segment"]},
-                ],
-                "quote_type": "",
-                "isIndex": True,
-                "isDepth": False
-            })
-            r = await c.post(
-                f"{sess['base_url']}/quick/quotes",
-                headers={
-                    "Auth": sess["session_token"],
-                    "Sid":  sess["session_sid"],
-                    "neo-fin-key": NEO_FIN_KEY,
-                    "Content-Type": "application/x-www-form-urlencoded"
-                },
-                data={"jData": jData}
-            )
-            raw = r.json()
-            logger.info(f"Market data [{req.instrument}]: {str(raw)[:500]}")
+            tokens = [
+                {"instrument_token": inst["instrument_token"], "exchange_segment": inst["exchange_segment"]},
+                {"instrument_token": vix["instrument_token"],  "exchange_segment": vix["exchange_segment"]},
+            ]
+            raw, debug = await _fetch_quotes(c, sess, tokens)
+            if raw is None:
+                # Surface the real upstream failure instead of a JSON decode error.
+                last = debug["attempts"][-1] if debug["attempts"] else {}
+                msg = last.get("error") or "no quote endpoint responded"
+                logger.error(f"Quote fetch failed [{req.instrument}]: {debug}")
+                return {
+                    "success": False, "ltp": 0, "vix": 0, "change": 0,
+                    "instrument": req.instrument,
+                    "error": msg,
+                    "attempts": debug["attempts"],
+                }
+            logger.info(f"Market data [{req.instrument}] via {debug['endpoint']}: {str(raw)[:500]}")
 
             # Parse — Kotak wraps response list under "message" key
             items = []
@@ -401,7 +485,10 @@ async def search_scrip(req: SearchRequest):
                 f"{sess['base_url']}/quick/scrips/search",
                 headers={"Auth": sess["session_token"], "Sid": sess["session_sid"], "neo-fin-key": NEO_FIN_KEY},
                 params=params)
-            return r.json()
+            data, err = safe_json(r)
+            if err:
+                return {"success": False, "error": err}
+            return data
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -438,7 +525,9 @@ async def chain_quotes(req: ChainRequest):
                 headers={"Auth": sess["session_token"], "Sid": sess["session_sid"], "neo-fin-key": NEO_FIN_KEY},
                 params={"symbol": req.instrument, "exchange_segment": "nse_fo",
                         "expiry": req.expiry, "option_type": "CE", "strike_price": str(atm)})
-            search_data = search_r.json()
+            search_data, err = safe_json(search_r)
+            if err:
+                return {"success": False, "error": err, "atm": atm, "strikes": strikes}
             logger.info(f"Scrip search: {str(search_data)[:200]}")
             return {"success": True, "atm": atm, "strikes": strikes, "search_sample": search_data}
         except Exception as e:
@@ -453,7 +542,10 @@ async def positions(req: SessionRequest):
         try:
             r = await c.get(f"{sess['base_url']}/quick/user/positions",
                 headers={"Auth": sess["session_token"], "Sid": sess["session_sid"], "neo-fin-key": NEO_FIN_KEY})
-            return r.json()
+            data, err = safe_json(r)
+            if err:
+                return {"success": False, "error": err}
+            return data
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -465,7 +557,10 @@ async def orders_list(req: SessionRequest):
         try:
             r = await c.get(f"{sess['base_url']}/quick/user/orders",
                 headers={"Auth": sess["session_token"], "Sid": sess["session_sid"], "neo-fin-key": NEO_FIN_KEY})
-            return r.json()
+            data, err = safe_json(r)
+            if err:
+                return {"success": False, "error": err}
+            return data
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -488,7 +583,9 @@ async def place_order(req: OrderRequest):
                 headers={"Auth": sess["session_token"], "Sid": sess["session_sid"],
                          "neo-fin-key": NEO_FIN_KEY, "Content-Type": "application/x-www-form-urlencoded"},
                 data={"jData": json.dumps(jData)})
-            result = r.json()
+            result, err = safe_json(r)
+            if err:
+                return {"success": False, "error": err}
             logger.info(f"Order placed: {result}")
             return result
         except Exception as e:
@@ -503,7 +600,10 @@ async def cancel_order(req: CancelRequest):
                 headers={"Auth": sess["session_token"], "Sid": sess["session_sid"],
                          "neo-fin-key": NEO_FIN_KEY, "Content-Type": "application/x-www-form-urlencoded"},
                 data={"jData": json.dumps({"am": req.am, "on": req.order_no})})
-            return r.json()
+            data, err = safe_json(r)
+            if err:
+                return {"success": False, "error": err}
+            return data
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -515,6 +615,9 @@ async def trades(req: SessionRequest):
         try:
             r = await c.get(f"{sess['base_url']}/quick/user/trades",
                 headers={"Auth": sess["session_token"], "Sid": sess["session_sid"], "neo-fin-key": NEO_FIN_KEY})
-            return r.json()
+            data, err = safe_json(r)
+            if err:
+                return {"success": False, "error": err}
+            return data
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
