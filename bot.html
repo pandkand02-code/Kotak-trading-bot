@@ -590,6 +590,10 @@ async function fetchWallet(){
       ['Auto Lots (15%)',String(al),'var(--accent)'],
     ].map(([k,v,c])=>`<div class="irow"><span class="ilbl">${k}</span><span style="color:${c};font-size:13px">${v}</span></div>`).join('');
     log('Wallet: ₹'+avl.toLocaleString('en-IN',{maximumFractionDigits:0})+' available','success');
+    if(avl===0 && Array.isArray(d._keys)){
+      // Diagnostic: show what fields Kotak actually returned so we can map them.
+      log('Wallet keys from Kotak: '+d._keys.join(', '),'warn');
+    }
   }catch(e){log('Wallet error: '+e.message,'error');}
 }
 

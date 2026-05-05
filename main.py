@@ -329,11 +329,46 @@ async def validate(req: ValidateRequest):
             raise HTTPException(status_code=500, detail=str(e))
 
 # ── WALLET / LIMITS ───────────────────────────────────────────────────────────
+# Kotak's /quick/user/limits ships the same numbers under wildly different
+# key names across account variants. The frontend only knows the short
+# camelCase names (avlCash, avlMrgn, …) — we map every known Kotak alias to
+# those canonical keys here so the UI Just Works regardless of which shape
+# Kotak's gateway returns for a given account.
+WALLET_ALIASES = {
+    "avlCash":   ["avlCash", "AvailableCash", "availableCash", "Net", "net",
+                  "Cash", "cash", "CashAvailable", "cashAvailable",
+                  "AvlCash", "AvlCashBal", "openingCashBalance"],
+    "avlMrgn":   ["avlMrgn", "AvailableMargin", "availableMargin",
+                  "marginAvailable", "AvlMrgn"],
+    "mrgnUsd":   ["mrgnUsd", "MarginUsed", "marginUsed", "usedMargin",
+                  "MrgnUsd", "marginUtilised"],
+    "insufFund": ["insufFund", "InsufficientFund", "insufficientFund",
+                  "InsufFund"],
+    "rmsVldtd":  ["rmsVldtd", "RmsValidate", "rmsValidate", "rms", "RmsVldtd"],
+}
+
+
+def _clean_num(v):
+    """Kotak sometimes returns '1,800.00' or ' 1800 '; parseFloat in JS would
+    stop at the comma. Strip whitespace + commas, leave non-numeric strings
+    (like 'OK' for rmsVldtd) untouched."""
+    if isinstance(v, (int, float)):
+        return v
+    if isinstance(v, str):
+        s = v.strip().replace(",", "")
+        try:
+            float(s)
+            return s
+        except ValueError:
+            return v
+    return v
+
+
 @app.post("/wallet/limits")
 async def limits(req: SessionRequest):
-    """Return Kotak limits flattened so the UI can read avlCash/avlMrgn/etc.
-    at the top level. Kotak wraps fields under 'data' or 'Data' depending on
-    the endpoint variant — we unwrap whichever is present."""
+    """Return Kotak limits flattened + alias-normalized so the UI can read
+    avlCash/avlMrgn/etc. at the top level regardless of which Kotak field
+    naming convention this account uses."""
     sess = get_session(req.session_id)
     async with httpx.AsyncClient(timeout=15) as c:
         try:
@@ -344,8 +379,8 @@ async def limits(req: SessionRequest):
             raw, err = safe_json(r)
             if err:
                 return {"success": False, "error": err}
-            # Unwrap: Kotak returns either {"data": {...fields...}} or
-            # {"Data": [{...fields...}]} or sometimes the fields at top level.
+
+            # Step 1: flatten any data/Data wrapper.
             flat: dict = {}
             if isinstance(raw, dict):
                 inner = raw.get("data") or raw.get("Data")
@@ -353,12 +388,31 @@ async def limits(req: SessionRequest):
                     inner = inner[0]
                 if isinstance(inner, dict):
                     flat.update(inner)
-                # Also surface top-level fields (e.g. when API returns flat)
                 for k, v in raw.items():
                     if k not in ("data", "Data") and not isinstance(v, (dict, list)):
                         flat.setdefault(k, v)
-            logger.info(f"Wallet limits flattened: avlCash={flat.get('avlCash')!r} keys={list(flat.keys())[:8]}")
-            return {"success": True, **flat, "_raw": raw}
+            elif isinstance(raw, list) and raw and isinstance(raw[0], dict):
+                flat.update(raw[0])
+
+            # Step 2: build alias index (case-insensitive) into the flat dict.
+            ci = {k.lower(): k for k in flat.keys()}
+            normalized: dict = {}
+            for canonical, aliases in WALLET_ALIASES.items():
+                for alias in aliases:
+                    real = ci.get(alias.lower())
+                    if real is not None and flat.get(real) not in (None, ""):
+                        normalized[canonical] = _clean_num(flat[real])
+                        break
+
+            logger.info(
+                f"Wallet limits: normalized={normalized} flat_keys={list(flat.keys())[:20]}"
+            )
+            return {
+                "success": True,
+                **normalized,
+                "_keys": sorted(flat.keys()),  # let the UI/dev see what Kotak actually returned
+                "_raw": raw,
+            }
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
