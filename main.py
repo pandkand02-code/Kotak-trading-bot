@@ -154,6 +154,26 @@ KOTAK_VALIDATE_URL = "https://mis.kotaksecurities.com/login/1.0/tradeApiValidate
 NEO_FIN_KEY        = "neotradeapi"
 sessions: dict     = {}
 
+# Live-quote WebSocket streamers (one per session_id). Kotak's REST quote
+# endpoints return HTTP 503 on most NEO accounts, so quotes flow through the
+# HSI WebSocket and are read from this in-memory cache.
+from streamer import KotakStreamer
+streamers: dict[str, KotakStreamer] = {}
+
+
+async def get_streamer(sid: str) -> KotakStreamer:
+    sess = get_session(sid)
+    s = streamers.get(sid)
+    if s is None:
+        s = KotakStreamer(
+            session_token=sess["session_token"],
+            session_sid=sess["session_sid"],
+            hs_server_id=sess.get("hsServerId", ""),
+        )
+        streamers[sid] = s
+    await s.ensure_running()
+    return s
+
 # ── Kotak Instrument Tokens (official) ──────────────────────────────────────
 INSTRUMENT_TOKENS = {
     "NIFTY":       {"instrument_token": "26000", "exchange_segment": "nse_cm"},
@@ -328,148 +348,70 @@ async def get_ohlc(req: QuoteRequest):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-# ── FULL MARKET DATA (LTP + OHLC + VIX) — correct Kotak format ──────────────
-async def _fetch_quotes(c: httpx.AsyncClient, sess: dict, tokens: list):
-    """Try Kotak quote endpoints in order until one returns valid JSON.
-
-    Kotak NEO has shipped multiple quote shapes across account types:
-      1. /quotes       — JSON body, newer NEO accounts
-      2. /quick/quotes — form-encoded jData, older NEO accounts
-    We try the JSON form first because the form-encoded path on the older URL
-    returns an empty body on several account variants (root cause of the
-    "Expecting value: line 1 column 1 (char 0)" error in the LOG tab).
-    Returns (raw_data, debug_info_dict).
-    """
-    base = sess["base_url"].rstrip("/")
-    headers_common = {
-        "Auth": sess["session_token"],
-        "Sid":  sess["session_sid"],
-        "neo-fin-key": NEO_FIN_KEY,
-    }
-
-    attempts = []
-
-    # Attempt 1: JSON body to /quotes
-    body_json = {
-        "instrument_tokens": tokens,
-        "quote_type": "",
-        "isIndex": True,
-        "isDepth": False,
-    }
-    try:
-        r1 = await c.post(
-            f"{base}/quotes",
-            headers={**headers_common, "Content-Type": "application/json"},
-            json=body_json,
-        )
-        data, err = safe_json(r1)
-        attempts.append({"url": "/quotes", "status": r1.status_code, "error": err})
-        if data is not None:
-            return data, {"endpoint": "/quotes", "attempts": attempts}
-    except httpx.HTTPError as e:
-        attempts.append({"url": "/quotes", "error": f"transport: {e}"})
-
-    # Attempt 2: form-encoded jData to /quick/quotes
-    jData = json.dumps(body_json)
-    try:
-        r2 = await c.post(
-            f"{base}/quick/quotes",
-            headers={**headers_common, "Content-Type": "application/x-www-form-urlencoded"},
-            data={"jData": jData},
-        )
-        data, err = safe_json(r2)
-        attempts.append({"url": "/quick/quotes", "status": r2.status_code, "error": err})
-        if data is not None:
-            return data, {"endpoint": "/quick/quotes", "attempts": attempts}
-    except httpx.HTTPError as e:
-        attempts.append({"url": "/quick/quotes", "error": f"transport: {e}"})
-
-    return None, {"endpoint": None, "attempts": attempts}
-
-
+# ── LIVE MARKET DATA (LTP + OHLC + VIX via WebSocket cache) ─────────────────
 @app.post("/quotes/market_data")
 async def get_market_data(req: QuoteRequest):
-    """Real LTP, OHLC, change% from Kotak NEO API with endpoint fallback."""
-    sess = get_session(req.session_id)
+    """Live LTP/change/VIX from the Kotak HSI WebSocket tick cache.
+
+    Kotak's REST quote endpoints (/quotes, /quick/quotes) return HTTP 503 on
+    most NEO accounts. Quotes flow through the HSI WebSocket instead — see
+    streamer.py. This handler ensures the streamer is running, registers the
+    requested instrument + VIX as a subscription, then returns the latest
+    cached tick. The first call after login returns ltp=0 with success=False
+    while the WS handshake completes; subsequent calls (every 5s from the UI)
+    return live data.
+    """
     inst = INSTRUMENT_TOKENS.get(req.instrument.upper())
     vix  = INSTRUMENT_TOKENS["VIX"]
     if not inst:
         raise HTTPException(status_code=400, detail=f"Unknown instrument: {req.instrument}")
 
-    async with httpx.AsyncClient(timeout=20) as c:
-        try:
-            tokens = [
-                {"instrument_token": inst["instrument_token"], "exchange_segment": inst["exchange_segment"]},
-                {"instrument_token": vix["instrument_token"],  "exchange_segment": vix["exchange_segment"]},
-            ]
-            raw, debug = await _fetch_quotes(c, sess, tokens)
-            if raw is None:
-                # Surface the real upstream failure instead of a JSON decode error.
-                last = debug["attempts"][-1] if debug["attempts"] else {}
-                msg = last.get("error") or "no quote endpoint responded"
-                logger.error(f"Quote fetch failed [{req.instrument}]: {debug}")
-                return {
-                    "success": False, "ltp": 0, "vix": 0, "change": 0,
-                    "instrument": req.instrument,
-                    "error": msg,
-                    "attempts": debug["attempts"],
-                }
-            logger.info(f"Market data [{req.instrument}] via {debug['endpoint']}: {str(raw)[:500]}")
+    s = await get_streamer(req.session_id)
+    await s.subscribe([inst, vix])
 
-            # Parse — Kotak wraps response list under "message" key
-            items = []
-            if isinstance(raw, dict):
-                msg = raw.get("message", raw.get("data", raw.get("result", [])))
-                if isinstance(msg, str):
-                    try: items = json.loads(msg)
-                    except: items = []
-                elif isinstance(msg, list):
-                    items = msg
-            elif isinstance(raw, list):
-                items = raw
+    inst_tick = s.get_tick(inst["instrument_token"])
+    vix_tick  = s.get_tick(vix["instrument_token"])
 
-            result = {"instrument": req.instrument, "success": True, "raw_count": len(items)}
-            for item in items:
-                if not isinstance(item, dict): continue
-                token = str(item.get("instrument_token", item.get("tk", "")))
-                # LTP field varies: last_traded_price or ltp or lp
-                ltp  = item.get("last_traded_price", item.get("ltp", item.get("lp", "0")))
-                ohlc = item.get("ohlc", {})
-                # open/high/low/close also sometimes top-level
-                o = float(ohlc.get("open",  item.get("open",  item.get("o", 0))) or 0)
-                h = float(ohlc.get("high",  item.get("high",  item.get("h", 0))) or 0)
-                l = float(ohlc.get("low",   item.get("low",   item.get("l", 0))) or 0)
-                cl= float(ohlc.get("close", item.get("close", item.get("c", 0))) or 0)
-                chng = item.get("net_change_percentage", item.get("change_percentage", item.get("nc", item.get("pc", "0"))))
-                vol  = item.get("volume", item.get("v", "0"))
-                oi   = item.get("open_interest", item.get("oi", "0"))
+    if inst_tick and inst_tick["ltp"] > 0:
+        return {
+            "success": True,
+            "instrument": req.instrument,
+            "ltp":    inst_tick["ltp"],
+            "open":   inst_tick["open"],
+            "high":   inst_tick["high"],
+            "low":    inst_tick["low"],
+            "close":  inst_tick["close"],
+            "change": inst_tick["change"],
+            "volume": inst_tick["volume"],
+            "oi":     inst_tick["oi"],
+            "vix":    (vix_tick or {}).get("ltp", 0),
+            "ts":     inst_tick["ts"],
+            "source": "websocket",
+        }
 
-                if token == inst["instrument_token"]:
-                    result["ltp"]    = float(ltp or 0)
-                    result["open"]   = o
-                    result["high"]   = h
-                    result["low"]    = l
-                    result["close"]  = cl
-                    result["change"] = float(chng or 0)
-                    result["volume"] = float(vol or 0)
-                    result["oi"]     = float(oi or 0)
-                elif token == vix["instrument_token"]:
-                    result["vix"] = float(ltp or 0)
+    # No tick yet — connection still establishing or instrument not pushed yet.
+    st = s.status()
+    return {
+        "success": False,
+        "instrument": req.instrument,
+        "ltp": 0, "vix": 0, "change": 0,
+        "open": 0, "high": 0, "low": 0, "close": 0,
+        "error": (
+            "warming up: WS not connected yet" if not st["connected"]
+            else "no tick received yet (subscribed, waiting for first frame)"
+        ),
+        "stream": st,
+    }
 
-            result.setdefault("ltp",    0)
-            result.setdefault("vix",    0)
-            result.setdefault("change", 0)
-            result.setdefault("open",   0)
-            result.setdefault("high",   0)
-            result.setdefault("low",    0)
-            result.setdefault("close",  0)
-            return result
 
-        except Exception as e:
-            logger.error(f"Market data error: {e}")
-            # Return structured error so frontend knows
-            return {"success": False, "ltp": 0, "vix": 0, "change": 0,
-                    "error": str(e), "instrument": req.instrument}
+@app.post("/quotes/stream_status")
+async def stream_status(req: SessionRequest):
+    """Inspect the WebSocket streamer for a session — connection state,
+    frames received, last error, subscribed scrips, cached tokens."""
+    s = streamers.get(req.session_id)
+    if s is None:
+        return {"running": False, "message": "no streamer for this session yet"}
+    return {"running": True, **s.status()}
 
 # ── SEARCH SCRIP (find option chain tokens) ───────────────────────────────────
 @app.post("/scrip/search")
