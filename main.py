@@ -9,6 +9,7 @@ Rate limits enforced as per Kotak NEO API documentation:
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
+import os
 import httpx, json, asyncio, time
 from datetime import datetime
 from collections import deque
@@ -154,9 +155,54 @@ KOTAK_VALIDATE_URL = "https://mis.kotaksecurities.com/login/1.0/tradeApiValidate
 NEO_FIN_KEY        = "neotradeapi"
 sessions: dict     = {}
 
-# Live-quote WebSocket streamers (one per session_id). Kotak's REST quote
-# endpoints return HTTP 503 on most NEO accounts, so quotes flow through the
-# HSI WebSocket and are read from this in-memory cache.
+# Persist sessions to disk so they survive Railway redeploys. Kotak access
+# tokens are valid for ~24h, so persistence means the user only re-logs in
+# when their Kotak token actually expires, not every time we push code.
+# Path is configurable via SESSIONS_FILE env var; defaults to ./sessions.json.
+# If a Railway volume is mounted at /data, point SESSIONS_FILE=/data/sessions.json
+# in the service config and sessions survive across deploys too.
+SESSIONS_FILE = os.environ.get("SESSIONS_FILE", "sessions.json")
+SESSION_TTL_HOURS = int(os.environ.get("SESSION_TTL_HOURS", "20"))
+
+
+def _sessions_save() -> None:
+    try:
+        with open(SESSIONS_FILE, "w") as f:
+            json.dump(sessions, f)
+    except OSError as e:
+        logger.warning(f"sessions persist failed: {e}")
+
+
+def _sessions_load() -> None:
+    if not os.path.exists(SESSIONS_FILE):
+        return
+    try:
+        with open(SESSIONS_FILE) as f:
+            loaded = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning(f"sessions load failed: {e}")
+        return
+    cutoff = datetime.now().timestamp() - SESSION_TTL_HOURS * 3600
+    kept = 0
+    for sid, sess in loaded.items():
+        try:
+            ts = datetime.fromisoformat(sess.get("created_at", "")).timestamp()
+        except ValueError:
+            continue
+        if ts >= cutoff:
+            sessions[sid] = sess
+            kept += 1
+    logger.info(f"sessions loaded: {kept}/{len(loaded)} from {SESSIONS_FILE}")
+
+
+@app.on_event("startup")
+async def _on_startup():
+    _sessions_load()
+
+
+# Live-quote WebSocket streamers (one per session_id). Kept as a fallback
+# path; the primary live-quote source is /script-details/1.0/quotes/neosymbol
+# REST (see _ltp_via_script_details).
 from streamer import KotakStreamer
 streamers: dict[str, KotakStreamer] = {}
 
@@ -227,7 +273,6 @@ def get_session(sid):
     return sessions[sid]
 
 # ── Serve Frontend ────────────────────────────────────────────────────────────
-import os
 BOT_HTML = open("bot.html").read() if os.path.exists("bot.html") else "<h1>bot.html missing</h1>"
 
 @app.get("/", response_class=HTMLResponse)
@@ -277,6 +322,7 @@ async def validate(req: ValidateRequest):
                     "hsServerId":    d["data"].get("hsServerId", ""),
                     "created_at":    datetime.now().isoformat()
                 }
+                _sessions_save()
                 return {"success": True, "session_id": sid}
             return {"success": False, "message": d.get("message", "MPIN failed")}
         except Exception as e:
@@ -285,6 +331,9 @@ async def validate(req: ValidateRequest):
 # ── WALLET / LIMITS ───────────────────────────────────────────────────────────
 @app.post("/wallet/limits")
 async def limits(req: SessionRequest):
+    """Return Kotak limits flattened so the UI can read avlCash/avlMrgn/etc.
+    at the top level. Kotak wraps fields under 'data' or 'Data' depending on
+    the endpoint variant — we unwrap whichever is present."""
     sess = get_session(req.session_id)
     async with httpx.AsyncClient(timeout=15) as c:
         try:
@@ -292,10 +341,24 @@ async def limits(req: SessionRequest):
                 headers={"Auth": sess["session_token"], "Sid": sess["session_sid"],
                          "neo-fin-key": NEO_FIN_KEY, "Content-Type": "application/x-www-form-urlencoded"},
                 data={"jData": json.dumps({"seg": "ALL", "exch": "ALL", "prod": "ALL"})})
-            data, err = safe_json(r)
+            raw, err = safe_json(r)
             if err:
                 return {"success": False, "error": err}
-            return data
+            # Unwrap: Kotak returns either {"data": {...fields...}} or
+            # {"Data": [{...fields...}]} or sometimes the fields at top level.
+            flat: dict = {}
+            if isinstance(raw, dict):
+                inner = raw.get("data") or raw.get("Data")
+                if isinstance(inner, list) and inner:
+                    inner = inner[0]
+                if isinstance(inner, dict):
+                    flat.update(inner)
+                # Also surface top-level fields (e.g. when API returns flat)
+                for k, v in raw.items():
+                    if k not in ("data", "Data") and not isinstance(v, (dict, list)):
+                        flat.setdefault(k, v)
+            logger.info(f"Wallet limits flattened: avlCash={flat.get('avlCash')!r} keys={list(flat.keys())[:8]}")
+            return {"success": True, **flat, "_raw": raw}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
