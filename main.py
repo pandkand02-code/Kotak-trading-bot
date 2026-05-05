@@ -175,13 +175,16 @@ async def get_streamer(sid: str) -> KotakStreamer:
     return s
 
 # ── Kotak Instrument Tokens (official) ──────────────────────────────────────
+# neo_symbol is the human name Kotak's /script-details/1.0/quotes/neosymbol
+# REST endpoint expects (e.g. "Nifty 50", "India VIX"). instrument_token is
+# kept for reference / WebSocket subscription paths.
 INSTRUMENT_TOKENS = {
-    "NIFTY":       {"instrument_token": "26000", "exchange_segment": "nse_cm"},
-    "BANKNIFTY":   {"instrument_token": "26009", "exchange_segment": "nse_cm"},
-    "FINNIFTY":    {"instrument_token": "26037", "exchange_segment": "nse_cm"},
-    "MIDCPNIFTY":  {"instrument_token": "26074", "exchange_segment": "nse_cm"},
-    "SENSEX":      {"instrument_token": "1",     "exchange_segment": "bse_cm"},
-    "VIX":         {"instrument_token": "26017", "exchange_segment": "nse_cm"},
+    "NIFTY":       {"instrument_token": "26000", "exchange_segment": "nse_cm", "neo_symbol": "Nifty 50"},
+    "BANKNIFTY":   {"instrument_token": "26009", "exchange_segment": "nse_cm", "neo_symbol": "Nifty Bank"},
+    "FINNIFTY":    {"instrument_token": "26037", "exchange_segment": "nse_cm", "neo_symbol": "Nifty Fin Service"},
+    "MIDCPNIFTY":  {"instrument_token": "26074", "exchange_segment": "nse_cm", "neo_symbol": "NIFTY MID SELECT"},
+    "SENSEX":      {"instrument_token": "1",     "exchange_segment": "bse_cm", "neo_symbol": "SENSEX"},
+    "VIX":         {"instrument_token": "26017", "exchange_segment": "nse_cm", "neo_symbol": "India VIX"},
 }
 
 # ── Models ────────────────────────────────────────────────────────────────────
@@ -266,6 +269,7 @@ async def validate(req: ValidateRequest):
             if d.get("data", {}).get("token"):
                 sid = f"sess_{req.view_sid[-8:]}"
                 sessions[sid] = {
+                    "access_token":  req.access_token,   # required for /script-details/* REST quotes
                     "session_token": d["data"]["token"],
                     "session_sid":   d["data"]["sid"],
                     "server_id":     d["data"].get("sid", ""),
@@ -348,59 +352,104 @@ async def get_ohlc(req: QuoteRequest):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-# ── LIVE MARKET DATA (LTP + OHLC + VIX via WebSocket cache) ─────────────────
+# ── LIVE MARKET DATA (LTP + VIX via /script-details/1.0/quotes/neosymbol) ───
+async def _ltp_via_script_details(c: httpx.AsyncClient, sess: dict, neo_symbol: str, exch: str):
+    """Hit Kotak's /script-details/1.0/quotes/neosymbol/{exch}|{symbol}/ltp.
+
+    This is the REST quote path that actually works on NEO accounts (the
+    /quotes and /quick/quotes paths return 503). Auth uses the user's static
+    access_token, NOT the post-login session_token — that's the trick.
+
+    Returns (ltp_float|None, error_str|None).
+    """
+    base = sess["base_url"].rstrip("/")
+    # neosymbol is "{exch}|{name}" e.g. "nse_cm|Nifty 50"
+    url = f"{base}/script-details/1.0/quotes/neosymbol/{exch}|{neo_symbol}/ltp"
+    headers = {
+        "Authorization": sess.get("access_token", ""),
+        "Content-Type": "application/json",
+    }
+    try:
+        r = await c.get(url, headers=headers)
+    except httpx.HTTPError as e:
+        return None, f"transport: {type(e).__name__}: {e}"
+    data, err = safe_json(r)
+    if err:
+        return None, err
+    # Response shape: [{"ltp": "24351.18", ...}]  (sometimes a single dict)
+    if isinstance(data, list) and data:
+        item = data[0]
+    elif isinstance(data, dict) and ("ltp" in data or "data" in data):
+        item = data.get("data", data)
+        if isinstance(item, list) and item:
+            item = item[0]
+    else:
+        return None, f"unexpected shape: {str(data)[:200]}"
+    if not isinstance(item, dict):
+        return None, f"unexpected item shape: {str(item)[:200]}"
+    try:
+        return float(item.get("ltp") or 0), None
+    except (TypeError, ValueError) as e:
+        return None, f"ltp parse: {e}"
+
+
 @app.post("/quotes/market_data")
 async def get_market_data(req: QuoteRequest):
-    """Live LTP/change/VIX from the Kotak HSI WebSocket tick cache.
+    """Live LTP + VIX via Kotak's /script-details quotes REST endpoint.
 
-    Kotak's REST quote endpoints (/quotes, /quick/quotes) return HTTP 503 on
-    most NEO accounts. Quotes flow through the HSI WebSocket instead — see
-    streamer.py. This handler ensures the streamer is running, registers the
-    requested instrument + VIX as a subscription, then returns the latest
-    cached tick. The first call after login returns ltp=0 with success=False
-    while the WS handshake completes; subsequent calls (every 5s from the UI)
-    return live data.
+    Falls back to the WebSocket streamer (streamer.py) if REST fails — that
+    path is kept in case the script-details endpoint goes 503 on some account
+    variants.
     """
     inst = INSTRUMENT_TOKENS.get(req.instrument.upper())
     vix  = INSTRUMENT_TOKENS["VIX"]
     if not inst:
         raise HTTPException(status_code=400, detail=f"Unknown instrument: {req.instrument}")
 
-    s = await get_streamer(req.session_id)
-    await s.subscribe([inst, vix])
+    sess = get_session(req.session_id)
 
-    inst_tick = s.get_tick(inst["instrument_token"])
-    vix_tick  = s.get_tick(vix["instrument_token"])
+    async with httpx.AsyncClient(timeout=15) as c:
+        ltp_inst, err_inst = await _ltp_via_script_details(c, sess, inst["neo_symbol"], inst["exchange_segment"])
+        ltp_vix,  err_vix  = await _ltp_via_script_details(c, sess, vix["neo_symbol"],  vix["exchange_segment"])
 
-    if inst_tick and inst_tick["ltp"] > 0:
+    if ltp_inst is not None and ltp_inst > 0:
         return {
-            "success": True,
+            "success":    True,
             "instrument": req.instrument,
-            "ltp":    inst_tick["ltp"],
-            "open":   inst_tick["open"],
-            "high":   inst_tick["high"],
-            "low":    inst_tick["low"],
-            "close":  inst_tick["close"],
-            "change": inst_tick["change"],
-            "volume": inst_tick["volume"],
-            "oi":     inst_tick["oi"],
-            "vix":    (vix_tick or {}).get("ltp", 0),
-            "ts":     inst_tick["ts"],
-            "source": "websocket",
+            "ltp":        ltp_inst,
+            "vix":        ltp_vix or 0,
+            # Change/OHLC require a separate /ohlc call we don't have yet;
+            # the UI tolerates 0 here and just shows spot.
+            "change": 0, "open": 0, "high": 0, "low": 0, "close": 0,
+            "source": "script-details/ltp",
         }
 
-    # No tick yet — connection still establishing or instrument not pushed yet.
-    st = s.status()
+    # REST failed — fall back to the WebSocket streamer (kept around for this).
+    try:
+        s = await get_streamer(req.session_id)
+        await s.subscribe([inst, vix])
+        t = s.get_tick(inst["instrument_token"])
+        v = s.get_tick(vix["instrument_token"])
+        if t and t["ltp"] > 0:
+            return {
+                "success": True, "instrument": req.instrument,
+                "ltp": t["ltp"], "vix": (v or {}).get("ltp", 0),
+                "open": t["open"], "high": t["high"], "low": t["low"], "close": t["close"],
+                "change": t["change"], "volume": t["volume"], "oi": t["oi"],
+                "source": "websocket",
+            }
+        ws_status = s.status()
+    except Exception as e:
+        ws_status = {"error": f"{type(e).__name__}: {e}"}
+
     return {
         "success": False,
         "instrument": req.instrument,
         "ltp": 0, "vix": 0, "change": 0,
         "open": 0, "high": 0, "low": 0, "close": 0,
-        "error": (
-            "warming up: WS not connected yet" if not st["connected"]
-            else "no tick received yet (subscribed, waiting for first frame)"
-        ),
-        "stream": st,
+        "error": err_inst or "no quote source returned data",
+        "rest_error_vix": err_vix,
+        "ws": ws_status,
     }
 
 
