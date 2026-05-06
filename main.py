@@ -210,8 +210,10 @@ streamers: dict[str, KotakStreamer] = {}
 # in-memory caches that don't need per-session isolation.
 from scrip import ScripMaster
 from risk import RiskEngine
+from ticks import TickRecorder
 scrip_master = ScripMaster()
 risk_engine = RiskEngine()
+tick_recorder = TickRecorder()
 
 
 async def get_streamer(sid: str) -> KotakStreamer:
@@ -551,15 +553,26 @@ async def get_market_data(req: QuoteRequest):
         ltp_vix,  err_vix  = await _ltp_via_script_details(c, sess, vix["neo_symbol"],  vix["exchange_segment"])
 
     if ltp_inst is not None and ltp_inst > 0:
+        # Record the tick into the intraday recorder so the AI signal layer
+        # gets real open/high/low/change% derived from the session's price
+        # history. Without this, every Claude call sees change=0 and outputs
+        # WAIT/NEUTRAL because there's no real price action to reason about.
+        stats = tick_recorder.record(req.instrument.upper(), ltp_inst)
+        if ltp_vix and ltp_vix > 0:
+            tick_recorder.record("VIX", ltp_vix)
         return {
-            "success":    True,
-            "instrument": req.instrument,
-            "ltp":        ltp_inst,
-            "vix":        ltp_vix or 0,
-            # Change/OHLC require a separate /ohlc call we don't have yet;
-            # the UI tolerates 0 here and just shows spot.
-            "change": 0, "open": 0, "high": 0, "low": 0, "close": 0,
-            "source": "script-details/ltp",
+            "success":     True,
+            "instrument":  req.instrument,
+            "ltp":         ltp_inst,
+            "vix":         ltp_vix or 0,
+            "open":        stats.get("open", ltp_inst),
+            "high":        stats.get("high", ltp_inst),
+            "low":         stats.get("low", ltp_inst),
+            "close":       stats.get("open", ltp_inst),  # session open as best-known prev ref
+            "change":      stats.get("change", 0),
+            "momentum_5m": stats.get("momentum_5m", 0),
+            "ticks_count": stats.get("ticks_count", 1),
+            "source":      "script-details/ltp",
         }
 
     # REST failed — fall back to the WebSocket streamer (kept around for this).
