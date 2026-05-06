@@ -213,12 +213,12 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
           </div>
         </div>
         <div class="sl-row">
-          <div class="sl-hdr"><span style="color:var(--dim)">TARGET PROFIT</span><span style="color:var(--green)" id="tpLbl">2.5%</span></div>
-          <input type="range" id="tpS" min="2" max="10" step="0.5" value="2.5" oninput="document.getElementById('tpLbl').textContent=this.value+'%'">
+          <div class="sl-hdr"><span style="color:var(--dim)">TARGET PROFIT</span><span style="color:var(--green)" id="tpLbl">3%</span></div>
+          <input type="range" id="tpS" min="2" max="10" step="0.5" value="3" oninput="document.getElementById('tpLbl').textContent=this.value+'%'">
         </div>
         <div class="sl-row">
-          <div class="sl-hdr"><span style="color:var(--dim)">STOP LOSS</span><span style="color:var(--red)" id="slLbl">1.5%</span></div>
-          <input type="range" id="slS" min="0.5" max="5" step="0.5" value="1.5" oninput="document.getElementById('slLbl').textContent=this.value+'%'">
+          <div class="sl-hdr"><span style="color:var(--dim)">STOP LOSS</span><span style="color:var(--red)" id="slLbl">2%</span></div>
+          <input type="range" id="slS" min="0.5" max="5" step="0.5" value="2" oninput="document.getElementById('slLbl').textContent=this.value+'%'">
         </div>
         <div class="sl-row">
           <div class="sl-hdr"><span style="color:var(--dim)">MAX DAILY LOSS</span><span style="color:var(--gold)" id="mlLbl">3%</span></div>
@@ -598,6 +598,14 @@ async function fetchWallet(){
     if(Array.isArray(d._keys)){
       log('Wallet keys from Kotak: '+d._keys.join(', '),'info');
     }
+    // Surface the risk engine snapshot every wallet refresh.
+    if(d.risk){
+      const rs=d.risk;
+      const tgt=rs.targets||{};
+      const pct=(rs.realised_pnl_pct||0).toFixed(2);
+      log(`Risk: day_start ₹${(rs.day_start||0).toFixed(0)} | P&L ₹${(rs.realised_pnl||0).toFixed(0)} (${pct}%) | TP+₹${(tgt.daily_profit_inr||0).toFixed(0)} / SL-₹${Math.abs(tgt.daily_loss_inr||0).toFixed(0)}`,'info');
+      if(rs.halted) log('🛑 Risk halted: '+rs.halted_reason,'error');
+    }
   }catch(e){log('Wallet error: '+e.message,'error');}
 }
 
@@ -668,6 +676,18 @@ async function placeOrder(side,rowOvr){
   const tp=+(ltp*(1+parseFloat(document.getElementById('tpS').value)/100)).toFixed(2);
   const sl=+(ltp*(1-parseFloat(document.getElementById('slS').value)/100)).toFixed(2);
   const sym=G.inst+row.strike+side, tid='T'+Date.now();
+
+  // Risk gate: pre-trade check against daily caps + wallet headroom.
+  if(G.sid){
+    try{
+      const rc=await api('/risk/check',{required_margin: ltp*qty});
+      if(!rc.allowed){
+        log('Trade BLOCKED by risk engine: '+rc.reason,'error');
+        return;
+      }
+    }catch(e){log('Risk check error: '+e.message,'warn');}
+  }
+
   log(`Placing: BUY ${qty}×${sym} @ MKT | TP:${tp} SL:${sl}`,'trade');
   if(G.sid){
     try{
@@ -698,13 +718,30 @@ function startMon(trade){
   },2500+Math.random()*1500);
 }
 
-function exitT(trade,res,ex){
+async function exitT(trade,res,ex){
   const pnl=(ex-trade.entryPrice)*trade.qty;
   G.open=G.open.filter(t=>t.id!==trade.id);
   G.done.push({...trade,exitPrice:ex.toFixed(2),pnl,status:res,exitTime:new Date().toLocaleTimeString('en-IN',{hour12:false})});
   G.pnl+=pnl;
   log(`${res==='WIN'?'✓ TARGET':'✗ SL HIT'}: ${trade.symbol} | Exit ₹${ex.toFixed(2)} | P&L ₹${pnl.toFixed(0)}`,res==='WIN'?'success':'error');
   render(); stats();
+
+  // Push booked PnL into the risk engine and refresh the wallet from Kotak
+  // so avlMrgn reflects the post-settlement balance. If a daily cap fires
+  // we stop the bot immediately.
+  if(G.sid){
+    try{
+      const rb=await api('/risk/book',{pnl});
+      const st=rb.state||{};
+      const pct=(st.realised_pnl_pct||0).toFixed(2);
+      log(`Day P&L ₹${(st.realised_pnl||0).toFixed(0)} (${pct}%) | Trades:${st.trades_today} W:${st.wins_today} L:${st.losses_today}`,'info');
+      if(st.halted){
+        log('🛑 RISK ENGINE HALTED: '+st.halted_reason,'error');
+        if(G.botOn) stopBot();
+      }
+    }catch(e){log('Risk book error: '+e.message,'warn');}
+    fetchWallet();  // refresh avlMrgn (settlement may lag a few seconds)
+  }
 }
 
 function render(){
@@ -881,6 +918,16 @@ async function startBot(){
   G.botIv=setInterval(async()=>{
     if(!G.botOn) return;
     await cycle();
+    // Risk engine kill-switch — also stops the bot loop when caps fire.
+    if(G.sid){
+      try{
+        const rs=await api('/risk/state',{},'GET');
+        if(rs?.halted){
+          log('🛑 Bot stopped — '+rs.halted_reason,'error');
+          stopBot(); return;
+        }
+      }catch(e){}
+    }
     if(G.sig?.confidence>=68&&G.open.length===0&&G.sig.direction!=='WAIT'){
       const step=G.inst==='BANKNIFTY'?100:50;
       const atm=Math.round(G.spot[G.inst]/step)*step;
