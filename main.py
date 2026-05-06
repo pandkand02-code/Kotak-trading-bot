@@ -206,6 +206,13 @@ async def _on_startup():
 from streamer import KotakStreamer
 streamers: dict[str, KotakStreamer] = {}
 
+# Scrip master + risk engine. Single instances per process — both are
+# in-memory caches that don't need per-session isolation.
+from scrip import ScripMaster
+from risk import RiskEngine
+scrip_master = ScripMaster()
+risk_engine = RiskEngine()
+
 
 async def get_streamer(sid: str) -> KotakStreamer:
     sess = get_session(sid)
@@ -410,12 +417,22 @@ async def limits(req: SessionRequest):
                 f"Wallet limits: normalized={normalized} sources={sources} "
                 f"flat_keys={list(flat.keys())[:20]}"
             )
+            # Push the available margin into the risk engine. avlMrgn is
+            # "Available Margin for Buying Options" — the field the user
+            # wants used as the live wallet (delayed settlements still show
+            # here even when avlCash hasn't updated yet).
+            wallet_value = normalized.get("avlMrgn") or normalized.get("avlCash") or 0
+            try:
+                risk_engine.set_wallet(float(wallet_value))
+            except (TypeError, ValueError):
+                pass
             return {
                 "success": True,
                 **normalized,
                 "_sources": sources,           # which Kotak field gave each canonical value
                 "_keys": sorted(flat.keys()),  # every flat key Kotak returned
                 "_raw": raw,
+                "risk":  risk_engine.state(),
             }
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -604,47 +621,152 @@ async def search_scrip(req: SearchRequest):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-# ── OPTION CHAIN QUOTES ───────────────────────────────────────────────────────
+# ── OPTION CHAIN ─────────────────────────────────────────────────────────────
 class ChainRequest(BaseModel):
     session_id: str
     instrument: str = "NIFTY"
-    spot: float = 24000
-    expiry: str = ""
+    spot:       float = 0.0   # 0 = auto-fetch from /quotes/market_data
+    n_strikes:  int = 5       # ATM ± n_strikes
+
 
 @app.post("/chain/quotes")
-async def chain_quotes(req: ChainRequest):
-    """Fetch real option chain LTP from Kotak for ATM ±5 strikes"""
+async def chain_quotes_legacy(req: ChainRequest):
+    """Backwards-compat alias — frontend used to call this name."""
+    req2 = ChainRequest(
+        session_id=req.session_id, instrument=req.instrument,
+        spot=req.spot or 0, n_strikes=req.n_strikes,
+    )
+    return await chain_atm(req2)
+
+
+@app.post("/chain/atm")
+async def chain_atm(req: ChainRequest):
+    """Real option chain for ATM ± n strikes from Kotak NEO.
+
+    Resolves each strike to its pSymbol via the scrip master, then fetches
+    LTP through /script-details/1.0/quotes/neosymbol/{neo_symbol}/ltp — the
+    same path that's working for the spot quote.
+
+    Rate-limit aware: we cap at 10 requests per second, batched. The loop
+    yields between batches so the global rate limiter doesn't blocking-throttle.
+    """
     sess = get_session(req.session_id)
-    step   = 100 if req.instrument == "BANKNIFTY" else 50
-    atm    = round(req.spot / step) * step
-    strikes = [atm + (i - 5) * step for i in range(11)]
+    inst = INSTRUMENT_TOKENS.get(req.instrument.upper())
+    if not inst:
+        raise HTTPException(status_code=400, detail=f"Unknown instrument: {req.instrument}")
 
-    # Build instrument tokens for CE and PE
-    tokens = []
-    inst_map = {}
-    for strike in strikes:
-        for otype in ["CE", "PE"]:
-            # Kotak uses instrument_token from scrip master; we use search API
-            key = f"{req.instrument}{strike}{otype}"
-            tokens.append({"symbol": req.instrument, "strike": strike, "otype": otype, "key": key})
+    # 1. Spot — needed to compute ATM. Caller may pass it; otherwise fetch.
+    spot = req.spot
+    if spot <= 0:
+        async with httpx.AsyncClient(timeout=10) as c:
+            ltp, err = await _ltp_via_script_details(c, sess, inst["neo_symbol"], inst["exchange_segment"])
+            if ltp is None or ltp <= 0:
+                return {"success": False, "error": f"spot fetch failed: {err}", "instrument": req.instrument}
+            spot = ltp
 
-    # Try to search and get tokens, then fetch quotes
-    async with httpx.AsyncClient(timeout=20) as c:
-        try:
-            # Search for ATM strike to get token format
-            search_r = await c.get(
-                f"{sess['base_url']}/quick/scrips/search",
-                headers={"Auth": sess["session_token"], "Sid": sess["session_sid"], "neo-fin-key": NEO_FIN_KEY},
-                params={"symbol": req.instrument, "exchange_segment": "nse_fo",
-                        "expiry": req.expiry, "option_type": "CE", "strike_price": str(atm)})
-            search_data, err = safe_json(search_r)
-            if err:
-                return {"success": False, "error": err, "atm": atm, "strikes": strikes}
-            logger.info(f"Scrip search: {str(search_data)[:200]}")
-            return {"success": True, "atm": atm, "strikes": strikes, "search_sample": search_data}
-        except Exception as e:
-            logger.error(f"Chain quotes error: {e}")
-            return {"success": False, "error": str(e), "atm": atm, "strikes": strikes}
+    # 2. Scrip master — find ATM±n strikes for nearest expiry of this underlying.
+    try:
+        chain_meta = await scrip_master.find_atm_chain(sess, req.instrument, spot, n=req.n_strikes)
+    except Exception as e:
+        logger.error(f"chain/atm scrip master: {e}")
+        return {"success": False, "error": f"scrip master: {e}", "instrument": req.instrument, "spot": spot}
+
+    if not chain_meta["strikes"]:
+        return {
+            "success": False,
+            "error": "no option strikes resolved (scrip master may still be loading)",
+            "instrument": req.instrument, "spot": spot,
+            "scrip_status": "ok",
+        }
+
+    # 3. Fetch LTPs for each leg via /script-details. Batch in groups of 8 to
+    #    stay under the 10 req/sec cap (we leave headroom for other endpoints).
+    legs: list[tuple[str, str, dict]] = []  # (strike_key, side, leg_info)
+    for row in chain_meta["strikes"]:
+        for side in ("ce", "pe"):
+            leg = row.get(side)
+            if leg and leg.get("p_symbol"):
+                legs.append((str(row["strike"]), side, leg))
+
+    out_strikes: dict[float, dict] = {
+        r["strike"]: {"strike": r["strike"], "atm": r["strike"] == chain_meta["atm"], "ce": None, "pe": None}
+        for r in chain_meta["strikes"]
+    }
+
+    async with httpx.AsyncClient(timeout=15) as c:
+        for i in range(0, len(legs), 8):
+            batch = legs[i:i + 8]
+            results = await asyncio.gather(*[
+                _ltp_via_script_details(c, sess, leg["p_symbol"], "nse_fo")
+                for _, _, leg in batch
+            ], return_exceptions=True)
+            for (strike_key, side, leg), result in zip(batch, results):
+                if isinstance(result, Exception):
+                    ltp, err = None, str(result)
+                else:
+                    ltp, err = result
+                out_strikes[float(strike_key)][side] = {
+                    "ltp":          ltp if ltp is not None else 0.0,
+                    "p_symbol":     leg["p_symbol"],
+                    "p_trd_symbol": leg["p_trd_symbol"],
+                    "lot_size":     leg["lot_size"],
+                    "error":        err,
+                }
+            if i + 8 < len(legs):
+                await asyncio.sleep(1.0)  # honour 10 req/sec ceiling
+
+    return {
+        "success":    True,
+        "instrument": req.instrument,
+        "spot":       spot,
+        "atm":        chain_meta["atm"],
+        "expiry":     chain_meta["expiry"],
+        "step":       chain_meta["step"],
+        "strikes":    [out_strikes[r["strike"]] for r in chain_meta["strikes"]],
+    }
+
+
+# ── RISK / WALLET-AWARE TRADE GATING ─────────────────────────────────────────
+class RiskBookRequest(BaseModel):
+    pnl: float
+
+
+class RiskCheckRequest(BaseModel):
+    required_margin: float = 0.0
+
+
+@app.get("/risk/state")
+async def risk_state():
+    return risk_engine.state()
+
+
+@app.post("/risk/check")
+async def risk_check(req: RiskCheckRequest):
+    ok, reason = risk_engine.can_trade(req.required_margin)
+    return {"allowed": ok, "reason": reason, "state": risk_engine.state()}
+
+
+@app.post("/risk/book")
+async def risk_book(req: RiskBookRequest):
+    risk_engine.book_trade(req.pnl)
+    return {"success": True, "state": risk_engine.state()}
+
+
+@app.post("/risk/reset_day")
+async def risk_reset_day():
+    risk_engine.reset_day()
+    return {"success": True, "state": risk_engine.state()}
+
+
+@app.get("/scrip/status")
+async def scrip_status():
+    """Surface what's cached in the scrip master loader for debugging."""
+    cached = sorted(scrip_master._cache.keys())
+    return {
+        "cached_segments_today": [seg for seg, _ in cached],
+        "cache_keys":            [{"segment": s, "date": d, "rows": len(scrip_master._cache[(s, d)])} for s, d in cached],
+        "paths_cached":          scrip_master._paths_cache[0] if scrip_master._paths_cache else None,
+    }
 
 # ── POSITIONS ─────────────────────────────────────────────────────────────────
 @app.post("/positions")
