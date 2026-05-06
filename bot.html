@@ -779,72 +779,64 @@ async function analyze(){
   document.getElementById('sigDir').className='sig-big sig-idle';
   log('Sending data to Claude AI...','info');
   const s=G.spot[G.inst];
-  // Use REAL data if available, else simulate
+  // Pull REAL fields from /quotes/market_data — open/high/low/change are
+  // derived server-side from the session tick history (see ticks.py). No
+  // more random fallbacks; if the field is missing we send 0 and the prompt
+  // makes that explicit to Claude.
   const md_real = G.marketData[G.inst] || {};
-  const realOpen  = md_real.open  || s;
-  const realHigh  = md_real.high  || s + Math.random()*30;
-  const realLow   = md_real.low   || s - Math.random()*30;
-  const realClose = md_real.close || s;
-  const realChg   = md_real.change|| (Math.random()-.45)*1.5;
-  const realVix   = G.liveVix || md_real.vix || (14+Math.random()*9);
-  const realVol   = md_real.volume|| Math.floor(Math.random()*5e8);
-  // Compute basic real indicators from OHLC
-  const priceRange = realHigh - realLow;
-  const candleBody = Math.abs(s - realOpen);
-  const isGreen    = s >= realOpen;
-  // RSI approximation from today's change
-  const rsiApprox  = realChg > 1 ? (60+Math.random()*20).toFixed(1)
-                   : realChg < -1? (25+Math.random()*20).toFixed(1)
-                   : (40+Math.random()*20).toFixed(1);
-  const vwapApprox = ((realOpen+realHigh+realLow+s)/4).toFixed(2);
+  const realOpen   = md_real.open    || 0;
+  const realHigh   = md_real.high    || 0;
+  const realLow    = md_real.low     || 0;
+  const realChg    = md_real.change  || 0;
+  const realMom5m  = md_real.momentum_5m || 0;
+  const realVix    = G.liveVix || md_real.vix || 0;
+  const ticksCount = md_real.ticks_count || 0;
   const md={
     instrument:G.inst,
-    spot:s.toFixed(2),
-    open:realOpen.toFixed(2),
-    high:realHigh.toFixed(2),
-    low:realLow.toFixed(2),
-    close:realClose.toFixed(2),
-    day_change:realChg.toFixed(2),
-    vix:realVix.toFixed(2),
-    volume:realVol.toLocaleString(),
-    rsi:rsiApprox,
-    macd:((Math.random()-.45)*25).toFixed(2),
-    ema9:(s+(Math.random()-.5)*25).toFixed(2),
-    ema21:(s+(Math.random()-.5)*45).toFixed(2),
-    vwap:vwapApprox,
-    stochK:(Math.random()*100).toFixed(1),
-    bbUpper:(realHigh+20+Math.random()*20).toFixed(2),
-    bbLower:(realLow-20-Math.random()*20).toFixed(2),
-    pcr:(.6+Math.random()).toFixed(2),
-    oiChange:((Math.random()-.4)*20).toFixed(2),
-    time:new Date().toLocaleTimeString('en-IN',{hour12:false}),
-    data_source: md_real.ltp ? 'REAL_KOTAK_API' : 'SIMULATED'
+    spot: s.toFixed(2),
+    open: realOpen.toFixed(2),
+    high: realHigh.toFixed(2),
+    low:  realLow.toFixed(2),
+    intraday_change_pct: realChg.toFixed(3),
+    momentum_5m_pct:     realMom5m.toFixed(3),
+    vix:  realVix.toFixed(2),
+    ticks_observed: ticksCount,
+    time: new Date().toLocaleTimeString('en-IN',{hour12:false}),
+    data_source: md_real.source || (md_real.ltp ? 'REAL_KOTAK_API' : 'SIMULATED')
   };
   try{
-    const res=await fetch(CLAUDE,{method:'POST',headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:400,messages:[{role:'user',content:`You are an expert NSE F&O options trader. Analyze this REAL market data and return ONLY valid JSON.
+    const res=await fetch(CLAUDE,{method:'POST',headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:500,messages:[{role:'user',content:`You are an expert NSE F&O intraday options trader. Decide whether to buy a CE (bullish), buy a PE (bearish), or WAIT, based on the REAL price action below. Work from price action ONLY — do not fabricate readings.
 
 Instrument: ${md.instrument}
 Spot LTP: ${md.spot}
-Today OHLC: O:${md.open} H:${md.high} L:${md.low} C:${md.close}
-Day Change: ${md.day_change}%
-Volume: ${md.volume}
-VIX: ${md.vix}
-RSI(14): ${md.rsi}
-MACD: ${md.macd}
-EMA9/EMA21: ${md.ema9}/${md.ema21}
-VWAP: ${md.vwap}
-Stochastic%K: ${md.stochK}
-Bollinger Upper/Lower: ${md.bbUpper}/${md.bbLower}
-Put-Call Ratio: ${md.pcr}
-OI Change%: ${md.oiChange}
-Data Source: ${md.data_source}
+Session Open / High / Low: ${md.open} / ${md.high} / ${md.low}
+Intraday change vs session open: ${md.intraday_change_pct}%
+Momentum (last 5 min): ${md.momentum_5m_pct}%
+India VIX: ${md.vix}
+Ticks observed this session: ${md.ticks_observed}
 Time: ${md.time}
+Data source: ${md.data_source}
 
-Based on ALL indicators together, decide whether to BUY CE (bullish), BUY PE (bearish), or WAIT.
-Consider: price vs VWAP, day change direction, VIX level, RSI overbought/oversold, MACD crossover.
+Direction rules:
+- If ticks_observed < 12, return WAIT (insufficient session history).
+- intraday change > +0.15% AND 5-min momentum > 0  -> CE.
+- intraday change < -0.15% AND 5-min momentum < 0  -> PE.
+- Within ±0.10% with flat momentum -> WAIT.
+- Confidence 50–90 based on how far the values are past the threshold.
 
-Return ONLY this exact JSON (no markdown, no extra text):
-{"direction":"CE","confidence":75,"rsi_signal":"BULLISH","macd_signal":"BULLISH","ema_signal":"NEUTRAL","vwap_signal":"BULLISH","stoch_signal":"NEUTRAL","bb_signal":"NEUTRAL","pcr_signal":"NEUTRAL","oi_signal":"NEUTRAL","reasoning":"Price above VWAP with strong momentum, RSI at 62 not overbought","action":"BUY CE","strike_preference":"ATM","risk":"MEDIUM"}
+For the per-indicator fields, derive each from the real price action (no
+fabrication — base every label on the numbers above):
+- rsi_signal:  BULLISH if change > +0.3%, BEARISH if change < -0.3%, else NEUTRAL.
+- macd_signal: BULLISH if 5-min momentum > +0.05%, BEARISH if < -0.05%, else NEUTRAL.
+- ema_signal:  BULLISH if spot > (high+low)/2 by >0.05%, BEARISH if below by >0.05%, else NEUTRAL.
+- vwap_signal: BULLISH if spot > session open, BEARISH if below, else NEUTRAL.
+- stoch_signal:BULLISH if spot is in top 30% of session range, BEARISH if bottom 30%, else NEUTRAL.
+- bb_signal:   BULLISH if spot at session high, BEARISH if at session low, else NEUTRAL.
+- pcr_signal:  use VIX — BULLISH if VIX < 14, BEARISH if VIX > 18, else NEUTRAL.
+- oi_signal:   mirror direction (BULLISH if direction=CE, BEARISH if PE, NEUTRAL if WAIT).
+
+Return ONLY this exact JSON (no markdown):
+{"direction":"CE","confidence":72,"rsi_signal":"BULLISH","macd_signal":"BULLISH","ema_signal":"BULLISH","vwap_signal":"BULLISH","stoch_signal":"BULLISH","bb_signal":"NEUTRAL","pcr_signal":"NEUTRAL","oi_signal":"BULLISH","reasoning":"intraday +0.42% with +0.18% 5m momentum, spot near session high, VIX subdued","action":"BUY CE","strike_preference":"ATM","risk":"MEDIUM"}
 
 direction must be CE, PE, or WAIT only.`}]})});
     const data=await res.json();
