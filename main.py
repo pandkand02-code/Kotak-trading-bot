@@ -397,20 +397,24 @@ async def limits(req: SessionRequest):
             # Step 2: build alias index (case-insensitive) into the flat dict.
             ci = {k.lower(): k for k in flat.keys()}
             normalized: dict = {}
+            sources: dict = {}  # canonical -> the actual Kotak field name we picked
             for canonical, aliases in WALLET_ALIASES.items():
                 for alias in aliases:
                     real = ci.get(alias.lower())
                     if real is not None and flat.get(real) not in (None, ""):
                         normalized[canonical] = _clean_num(flat[real])
+                        sources[canonical] = real
                         break
 
             logger.info(
-                f"Wallet limits: normalized={normalized} flat_keys={list(flat.keys())[:20]}"
+                f"Wallet limits: normalized={normalized} sources={sources} "
+                f"flat_keys={list(flat.keys())[:20]}"
             )
             return {
                 "success": True,
                 **normalized,
-                "_keys": sorted(flat.keys()),  # let the UI/dev see what Kotak actually returned
+                "_sources": sources,           # which Kotak field gave each canonical value
+                "_keys": sorted(flat.keys()),  # every flat key Kotak returned
                 "_raw": raw,
             }
         except Exception as e:
