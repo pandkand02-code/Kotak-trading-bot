@@ -624,6 +624,22 @@ function bs(S,K,T,sig,r,type){
 }
 function dte(){const d=new Date(),day=d.getDay();return Math.max(1,(4-day+7)%7||7)/365;}
 
+// NSE F&O hours: 09:15–15:30 IST, Mon–Fri. Returns {open: bool, reason: str}.
+// Built on epoch ms so the user's phone timezone doesn't matter.
+function marketStatus(){
+  const istMs = Date.now() + 5.5 * 3600 * 1000;  // shift epoch +5:30
+  const ist = new Date(istMs);
+  const day = ist.getUTCDay(); // after the +5:30 shift, getUTC* reads as IST
+  if(day === 0) return {open: false, reason: 'Sunday — NSE closed'};
+  if(day === 6) return {open: false, reason: 'Saturday — NSE closed'};
+  const mins = ist.getUTCHours()*60 + ist.getUTCMinutes();
+  const OPEN  = 9*60 + 15;   // 09:15 IST
+  const CLOSE = 15*60 + 30;  // 15:30 IST
+  if(mins < OPEN)  return {open: false, reason: 'Pre-market (opens 09:15 IST)'};
+  if(mins >= CLOSE) return {open: false, reason: 'Post-market (closed 15:30 IST)'};
+  return {open: true, reason: 'NSE live session'};
+}
+
 function buildChain(){
   const inst=G.inst,sp=G.spot[inst],step=inst==='BANKNIFTY'?100:50;
   const atm=Math.round(sp/step)*step,T=dte(),r=.065;
@@ -773,6 +789,23 @@ function stats(){
 async function analyze(){
   const key=document.getElementById('cKey').value.trim();
   if(!key){log('Enter Claude API key.','warn');return;}
+
+  // Market-hours guard. NSE is open 09:15–15:30 IST, Mon–Fri.
+  // During off-hours Kotak streams the previous day's close as a frozen
+  // LTP, so change/momentum are always 0 and Claude correctly outputs WAIT
+  // for every analysis. Refuse to run rather than burn API calls + show
+  // a misleading "Analysis complete" line.
+  const mkt = marketStatus();
+  if(!mkt.open){
+    document.getElementById('sigDir').textContent='CLOSED';
+    document.getElementById('sigDir').className='sig-big sig-idle';
+    document.getElementById('sigReason').textContent=mkt.reason;
+    const sb=document.getElementById('sigBadge');
+    sb.textContent='MARKET CLOSED'; sb.className='badge bd';
+    log('Market closed — '+mkt.reason+'. Skipping AI analysis.','warn');
+    return;
+  }
+
   const btn=document.getElementById('aBtn');
   btn.disabled=true; btn.textContent='⟳ ANALYZING...';
   document.getElementById('sigDir').textContent='...';
@@ -909,6 +942,15 @@ async function startBot(){
   await cycle();
   G.botIv=setInterval(async()=>{
     if(!G.botOn) return;
+    const mkt=marketStatus();
+    if(!mkt.open){
+      // Don't fire trades or burn Claude calls outside market hours.
+      // Refresh wallet/positions only — they still update in/out of session.
+      if(G.sid){await fetchWallet().catch(()=>{}); await fetchPos().catch(()=>{});}
+      const sb=document.getElementById('sigBadge');
+      sb.textContent='MARKET CLOSED'; sb.className='badge bd';
+      return;
+    }
     await cycle();
     // Risk engine kill-switch — also stops the bot loop when caps fire.
     if(G.sid){
