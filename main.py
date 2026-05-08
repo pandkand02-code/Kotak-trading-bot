@@ -854,6 +854,141 @@ async def cancel_order(req: CancelRequest):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+
+# ── ORDER PLACEMENT SMOKE TEST ───────────────────────────────────────────────
+class TestPlaceRequest(BaseModel):
+    session_id: str
+    instrument: str = "NIFTY"
+    price:      float = 0.05    # buy LIMIT at 5p — practically can't fill
+    qty_lots:   int   = 1
+
+
+@app.post("/orders/test_place")
+async def test_place(req: TestPlaceRequest):
+    """Place a tiny far-OTM BUY LIMIT @ ₹0.05 and immediately cancel it.
+
+    Goal: surface the *real* Kotak response so we can see whether the
+    server's outbound IP is whitelisted for trading. We auto-pick an ATM
+    CE for the nearest expiry from the scrip master, post the order, then
+    cancel it whether it acked or errored.
+
+    Why this is safe:
+      - LIMIT (not MKT), so no chance of slippage to a fill price.
+      - BUY at ₹0.05 — 5 paise is the minimum tick; nobody sells options
+        at that price, so the order sits in the book until cancel.
+      - Max possible loss if it somehow filled = ₹0.05 × lot_size × qty_lots.
+        For NIFTY 1 lot that's ₹0.05 × 75 = ₹3.75.
+      - We cancel it within ~1 second of acceptance.
+    """
+    sess = get_session(req.session_id)
+
+    # 1. Resolve a tradable ATM CE symbol.
+    inst = INSTRUMENT_TOKENS.get(req.instrument.upper())
+    if not inst:
+        raise HTTPException(status_code=400, detail=f"Unknown instrument: {req.instrument}")
+
+    spot = 0.0
+    async with httpx.AsyncClient(timeout=15) as c:
+        ltp, err = await _ltp_via_script_details(c, sess, inst["neo_symbol"], inst["exchange_segment"])
+        if not ltp or ltp <= 0:
+            return {"success": False, "stage": "spot_fetch", "error": err or "spot is 0"}
+        spot = ltp
+
+    try:
+        chain_meta = await scrip_master.find_atm_chain(sess, req.instrument, spot, n=2)
+    except Exception as e:
+        return {"success": False, "stage": "scrip_master", "error": str(e), "spot": spot}
+
+    atm_row = next((s for s in chain_meta["strikes"] if s["strike"] == chain_meta["atm"] and s.get("ce")), None)
+    if not atm_row:
+        return {"success": False, "stage": "atm_lookup", "error": "no ATM CE in scrip master", "spot": spot}
+
+    ce = atm_row["ce"]
+    pTrdSymbol = ce["p_trd_symbol"]
+    lot_size   = ce["lot_size"] or (75 if req.instrument.upper() == "NIFTY" else 35)
+    qty        = req.qty_lots * lot_size
+
+    # 2. Place the BUY LIMIT order. Capture *everything* — status, headers,
+    #    body — so any IP-whitelist or permissions error is visible.
+    place_url = f"{sess['base_url']}/quick/order/rule/ms/place"
+    jData = {
+        "am": "NO", "dq": "0", "es": "nse_fo", "mp": "0",
+        "pc": "MIS", "pf": "N",
+        "pr": f"{req.price:.2f}",
+        "pt": "L",                  # LIMIT
+        "qt": str(qty),
+        "rt": "DAY", "tp": "0",
+        "ts": pTrdSymbol,
+        "tt": "B",
+    }
+    place_diag: dict = {
+        "url":        place_url,
+        "trading_symbol": pTrdSymbol,
+        "qty":        qty,
+        "price":      req.price,
+        "atm_strike": chain_meta["atm"],
+        "spot":       spot,
+        "expiry":     chain_meta.get("expiry"),
+    }
+    async with httpx.AsyncClient(timeout=20) as c:
+        try:
+            r = await c.post(place_url,
+                headers={"Auth": sess["session_token"], "Sid": sess["session_sid"],
+                         "neo-fin-key": NEO_FIN_KEY,
+                         "Content-Type": "application/x-www-form-urlencoded"},
+                data={"jData": json.dumps(jData)})
+        except httpx.HTTPError as e:
+            place_diag["transport_error"] = f"{type(e).__name__}: {e}"
+            return {"success": False, "stage": "place_http", **place_diag}
+
+        place_diag["http_status"]    = r.status_code
+        place_diag["content_type"]   = r.headers.get("content-type", "")
+        place_diag["body_snippet"]   = (r.text or "")[:600]
+        body, parse_err = safe_json(r)
+        place_diag["parse_error"]    = parse_err
+        place_diag["body"]           = body
+
+    # 3. If we got an order number, cancel immediately.
+    order_no = None
+    if isinstance(body, dict):
+        order_no = body.get("nOrdNo") or body.get("orderNo") or body.get("ordNo")
+    place_diag["order_no"] = order_no
+
+    cancel_diag: dict = {}
+    if order_no:
+        async with httpx.AsyncClient(timeout=15) as c:
+            try:
+                cr = await c.post(f"{sess['base_url']}/quick/order/cancel",
+                    headers={"Auth": sess["session_token"], "Sid": sess["session_sid"],
+                             "neo-fin-key": NEO_FIN_KEY,
+                             "Content-Type": "application/x-www-form-urlencoded"},
+                    data={"jData": json.dumps({"am": "NO", "on": str(order_no)})})
+                cb, cerr = safe_json(cr)
+                cancel_diag = {
+                    "http_status": cr.status_code,
+                    "body":        cb,
+                    "parse_error": cerr,
+                }
+            except httpx.HTTPError as e:
+                cancel_diag = {"transport_error": f"{type(e).__name__}: {e}"}
+
+    # 4. Verdict for the frontend.
+    accepted = bool(order_no)
+    rejected_reason = None
+    if not accepted and isinstance(body, dict):
+        rejected_reason = body.get("emsg") or body.get("message") or body.get("errMsg")
+    return {
+        "success":          accepted,
+        "verdict":          "accepted (and cancelled)" if accepted else "rejected",
+        "rejected_reason":  rejected_reason,
+        "ip_whitelist_hint": (
+            "Look for 'IP', 'whitelist', 'access denied', '403', or 'Forbidden' in body_snippet/rejected_reason. "
+            "If absent and order was accepted, the IP is fine."
+        ),
+        "place":            place_diag,
+        "cancel":           cancel_diag,
+    }
+
 # ── TRADES ────────────────────────────────────────────────────────────────────
 @app.post("/trades")
 async def trades(req: SessionRequest):
