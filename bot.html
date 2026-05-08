@@ -465,10 +465,15 @@ async function testKotakOrder(){
     } else {
       log('❌ ORDER REJECTED at stage='+(res.stage||'place')+' — '+(res.rejected_reason||'see body'),'error');
       log('HTTP '+res.place?.http_status+' ('+(res.place?.content_type||'?')+'): '+(res.place?.body_snippet||'').substring(0,300),'warn');
-      // Look for IP-whitelist signals in the response
-      const blob = JSON.stringify(res).toLowerCase();
+      // Look for IP-whitelist signals — but ONLY in fields that come
+      // from Kotak (body_snippet + rejected_reason). The full response
+      // also contains our own diagnostic hint string, which would
+      // otherwise produce false-positive matches.
+      const kotakText = (
+        (res.place?.body_snippet || '') + ' ' + (res.rejected_reason || '')
+      ).toLowerCase();
       const ipHit = ['ip whitelist','ip not','access denied','forbidden','403','unauthorized ip','restricted ip']
-        .find(k => blob.includes(k));
+        .find(k => kotakText.includes(k));
       if(ipHit){
         log('🛑 IP WHITELIST ERROR DETECTED: "'+ipHit+'" — you need a static-IP VPS for trading.','error');
       } else {
