@@ -341,8 +341,9 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
     <div class="card">
       <div class="ch">
         <span class="ct">Activity Log (<span id="logCnt">0</span>)</span>
-        <div style="display:flex;gap:6px">
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
           <button class="btn btn-b btn-sm" onclick="testQuoteAPI()">TEST QUOTE</button>
+          <button class="btn btn-r btn-sm" onclick="testKotakOrder()">TEST ORDER</button>
           <button class="btn btn-sm" style="color:var(--dim);border-color:var(--dim)" onclick="clrLog()">CLEAR</button>
         </div>
       </div>
@@ -445,6 +446,37 @@ async function testQuoteAPI(){
     log('Quote API response: '+JSON.stringify(res).substring(0,300),'trade');
   }catch(e){
     log('Quote API test failed: '+e.message,'error');
+  }
+}
+
+// Order-placement smoke test. Places a 1-lot far-OTM CE BUY LIMIT @ ₹0.05
+// and immediately cancels. Surfaces any IP-whitelist or permissions error
+// from Kotak so we know whether the Railway IP can actually trade before
+// migrating to a static-IP VPS.
+async function testKotakOrder(){
+  if(!G.sid){log('Login first.','warn');return;}
+  if(!confirm('Place a 1-lot BUY LIMIT @ ₹0.05 for ATM CE and immediately cancel?\n\nMax possible loss if it somehow filled: ₹3.75.\n\nThis tests whether your Kotak account allows trades from the current server IP.')) return;
+  log('🧪 TEST ORDER: placing 1-lot ATM CE @ ₹0.05 BUY LIMIT...','trade');
+  try{
+    const res = await api('/orders/test_place',{session_id:G.sid,instrument:G.inst,price:0.05,qty_lots:1});
+    if(res.success){
+      log('✅ ORDER ACCEPTED by Kotak. OrdNo: '+res.place.order_no+'. The Railway IP can trade — no whitelist needed.','success');
+      log('Cancel result: '+JSON.stringify(res.cancel).substring(0,200),'info');
+    } else {
+      log('❌ ORDER REJECTED at stage='+(res.stage||'place')+' — '+(res.rejected_reason||'see body'),'error');
+      log('HTTP '+res.place?.http_status+' ('+(res.place?.content_type||'?')+'): '+(res.place?.body_snippet||'').substring(0,300),'warn');
+      // Look for IP-whitelist signals in the response
+      const blob = JSON.stringify(res).toLowerCase();
+      const ipHit = ['ip whitelist','ip not','access denied','forbidden','403','unauthorized ip','restricted ip']
+        .find(k => blob.includes(k));
+      if(ipHit){
+        log('🛑 IP WHITELIST ERROR DETECTED: "'+ipHit+'" — you need a static-IP VPS for trading.','error');
+      } else {
+        log('No IP-whitelist keywords in response. Rejection is for another reason (margin, symbol, market hours, etc.).','info');
+      }
+    }
+  }catch(e){
+    log('Test order failed: '+e.message,'error');
   }
 }
 
