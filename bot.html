@@ -768,13 +768,35 @@ function onInst(){
 function chgLots(d){G.lots=Math.max(1,Math.min(10,G.lots+d));document.getElementById('lotsV').textContent=G.lots;}
 
 // ── PLACE ORDER ───────────────────────────────────────────────────────────
+// Live trade entry. The displayed option chain in this app is a local
+// Black-Scholes approximation (no real Kotak symbols), so right before
+// placing the order we call /chain/resolve_strike to swap in the actual
+// p_trd_symbol + p_symbol + LTP from Kotak's scrip master. The resolved
+// p_symbol is persisted on the trade so the monitor can poll real LTPs.
 async function placeOrder(side,rowOvr){
   const row=rowOvr||G.selRow; if(!row){log('Select a strike.','warn');return;}
-  const ltp=parseFloat(side==='CE'?row.ce.ltp:row.pe.ltp);
   const qty=G.lots*LS[G.inst];
-  const tp=+(ltp*(1+parseFloat(document.getElementById('tpS').value)/100)).toFixed(2);
-  const sl=+(ltp*(1-parseFloat(document.getElementById('slS').value)/100)).toFixed(2);
-  const sym=G.inst+row.strike+side, tid='T'+Date.now();
+  const tid='T'+Date.now();
+
+  // Resolve the strike to a REAL Kotak contract. Without this we'd send
+  // a malformed trading symbol (e.g. 'NIFTY24500CE' has no expiry) and
+  // we'd compute TP/SL off the BS-simulated price instead of market.
+  let resolved = null;
+  if(G.sid){
+    try{
+      resolved = await api('/chain/resolve_strike',{session_id:G.sid, instrument:G.inst, strike:row.strike, side});
+      if(!resolved.ok){
+        log('Strike resolution failed: '+(resolved.error||'?')+' — cannot place real trade.','error');
+        return;
+      }
+    }catch(e){log('Strike resolution error: '+e.message,'error'); return;}
+  }
+  // Real values from Kotak (paper-mode falls back to chain UI values).
+  const ltp        = resolved ? resolved.ltp           : parseFloat(side==='CE'?row.ce.ltp:row.pe.ltp);
+  const realSymbol = resolved ? resolved.p_trd_symbol  : (G.inst+row.strike+side);
+  const pSymbol    = resolved ? resolved.p_symbol      : null;
+  const tp = +(ltp*(1+parseFloat(document.getElementById('tpS').value)/100)).toFixed(2);
+  const sl = +(ltp*(1-parseFloat(document.getElementById('slS').value)/100)).toFixed(2);
 
   // Risk gate: pre-trade check against daily caps + wallet headroom.
   if(G.sid){
@@ -787,25 +809,21 @@ async function placeOrder(side,rowOvr){
     }catch(e){log('Risk check error: '+e.message,'warn');}
   }
 
-  log(`Placing: BUY ${qty}×${sym} @ MKT | TP:${tp} SL:${sl}`,'trade');
-  // Two-gate guard before sending anything to Kotak:
-  //  1. Order auth verified via TEST ORDER (proves the account/IP can trade).
-  //  2. LIVE_MONITOR_READY — the position monitor uses Math.random() drift,
-  //     not real LTPs, so TP/SL hits would be coin flips. Until that's
-  //     wired to real Kotak option quotes, we refuse live trades.
-  if(G.sid && !LIVE_MONITOR_READY){
-    log('🛑 LIVE TRADE BLOCKED — position monitor is SIMULATED (Math.random drift, not real LTPs). TP/SL would not reflect market. Tracking as PAPER trade. See P0 in audit.','error');
-  } else if(G.sid && !G.orderAuthVerified){
+  log(`Placing: BUY ${qty}×${realSymbol} @ MKT | Entry ₹${ltp.toFixed(2)} | TP:${tp} SL:${sl}`,'trade');
+  // Gates before sending to Kotak. TEST ORDER must have succeeded
+  // (G.orderAuthVerified) and the quote stream must be healthy.
+  let liveOrdNo = null;
+  if(G.sid && !G.orderAuthVerified){
     log('🛑 LIVE TRADE BLOCKED — order auth not verified. Run TEST ORDER once (LOG tab) to unlock. Tracking as PAPER trade.','error');
   } else if(G.sid && G.quoteStale){
     log('🛑 LIVE TRADE BLOCKED — quote stream stale, refusing to act on old prices.','error');
   } else if(G.sid){
     try{
-      const res=await api('/orders/place',{session_id:G.sid,trading_symbol:sym,transaction_type:'B',quantity:String(qty),order_type:'MKT',exchange_segment:'nse_fo',product:'NRML'});
+      const res=await api('/orders/place',{session_id:G.sid,trading_symbol:realSymbol,transaction_type:'B',quantity:String(qty),order_type:'MKT',exchange_segment:'nse_fo',product:'NRML'});
       if(res.stat==='Ok'){
+        liveOrdNo = res.nOrdNo;
         log('✓ Order placed! OrdNo: '+res.nOrdNo,'success');
       } else {
-        // Try to surface an actionable cause from Kotak's response shape.
         const code = res.stCode || res.errCode || res.code;
         const msg  = res.emsg || res.errMsg || res.message || res.error || 'unknown';
         let hint = '';
@@ -819,43 +837,122 @@ async function placeOrder(side,rowOvr){
           hint = ' — bad trading symbol. Rebuild chain.';
         }
         log('Order error '+(code?'['+code+'] ':'')+msg+hint,'error');
+        return; // do NOT create a local trade if Kotak rejected
       }
-    }catch(e){log('Order failed: '+e.message,'error');}
+    }catch(e){log('Order failed: '+e.message,'error'); return;}
   }else log('[NO KOTAK SESSION] Tracked locally.','warn');
-  const trade={id:tid,symbol:sym,side,qty,lots:G.lots,entryPrice:ltp,currentLTP:ltp,tp,sl,pnl:0,pnlPct:0,entry:new Date().toLocaleTimeString('en-IN',{hour12:false}),status:'OPEN'};
+
+  const trade={
+    id:tid, symbol:realSymbol, side, qty, lots:G.lots,
+    entryPrice:ltp, currentLTP:ltp, tp, sl,
+    pnl:0, pnlPct:0,
+    entry:new Date().toLocaleTimeString('en-IN',{hour12:false}),
+    status:'OPEN',
+    pSymbol,            // for /quotes/option_ltp polling
+    entryOrdNo: liveOrdNo,
+    isPaper: !liveOrdNo // paper trades fall back to simulated drift
+  };
   G.open.push(trade); G.selRow=null;
   document.getElementById('orderBox').style.display='none';
   startMon(trade); render(); gt('orders');
 }
 
-// ⚠ MONITOR_IS_SIMULATED — read this before flipping LIVE_MONITOR_READY.
-// startMon() drifts t.currentLTP by Math.random(), NOT the option's real
-// Kotak LTP. That means on a real position the TP/SL hits below are coin
-// flips, not market triggers. Until startMon polls a real per-option
-// quote endpoint and feeds that into t.currentLTP, live order submission
-// is gated by LIVE_MONITOR_READY (see placeOrder).
-const LIVE_MONITOR_READY = false;
+// LIVE_MONITOR_READY: when true, live trades (real Kotak orders) are
+// allowed. startMon below polls /quotes/option_ltp every ~3 s and exits
+// via a real SELL on TP/SL. Paper trades (trade.isPaper === true) still
+// fall back to simulated drift so users can dry-run without a live
+// session.
+const LIVE_MONITOR_READY = true;
 
 // ── MONITOR ───────────────────────────────────────────────────────────────
+// Polls the real Kotak option LTP every ~3 s while the position is open.
+// Tolerates transient LTP fetch failures (up to MON_FAIL_TOL in a row)
+// before alerting — a single failed poll must not trigger an exit. On
+// TP/SL hit, exitT() places a real SELL @ MKT to close the position.
+const MON_POLL_MS  = 3000;
+const MON_FAIL_TOL = 4;     // ~12 s of consecutive failures before alert
 function startMon(trade){
   if(mon[trade.id]) return;
-  mon[trade.id]=setInterval(()=>{
+  trade._failStreak = 0;
+  const poll = async () => {
     const t=G.open.find(x=>x.id===trade.id);
     if(!t){clearInterval(mon[trade.id]);return;}
-    const drift=(Math.random()-.47)*t.entryPrice*.025;
-    t.currentLTP=Math.max(.05,(t.currentLTP||t.entryPrice)+drift);
+
+    // Paper trade: keep the legacy simulated drift so dry-run still works.
+    if(t.isPaper || !t.pSymbol || !G.sid){
+      const drift=(Math.random()-.47)*t.entryPrice*.025;
+      t.currentLTP=Math.max(.05,(t.currentLTP||t.entryPrice)+drift);
+    } else {
+      // Live trade: poll the real Kotak LTP for this option contract.
+      try{
+        const r = await api('/quotes/option_ltp',{session_id:G.sid, p_symbol:t.pSymbol, exchange:'nse_fo'});
+        if(r.ok && r.ltp > 0){
+          t.currentLTP = r.ltp;
+          t._failStreak = 0;
+        } else {
+          t._failStreak += 1;
+          if(t._failStreak === MON_FAIL_TOL){
+            log('⚠ MONITOR STALE on '+t.symbol+': '+MON_FAIL_TOL+' consecutive LTP fetch failures ('+(r.error||'?')+'). Holding position; TP/SL paused until LTP returns.','warn');
+          }
+          // Do NOT update currentLTP, do NOT trigger exits on stale data.
+          render(); return;
+        }
+      }catch(e){
+        t._failStreak += 1;
+        if(t._failStreak === MON_FAIL_TOL){
+          log('⚠ MONITOR ERROR on '+t.symbol+': '+e.message+'. Holding position.','warn');
+        }
+        render(); return;
+      }
+    }
+
     t.pnl=(t.currentLTP-t.entryPrice)*t.qty;
     t.pnlPct=((t.currentLTP-t.entryPrice)/t.entryPrice)*100;
     if(t.currentLTP>=t.tp){clearInterval(mon[trade.id]);exitT(t,'WIN',t.currentLTP);return;}
     if(t.currentLTP<=t.sl){clearInterval(mon[trade.id]);exitT(t,'LOSS',t.currentLTP);return;}
     render();
-  },2500+Math.random()*1500);
+  };
+  // Fire once immediately so the user sees a fresh LTP on the trade row.
+  poll();
+  mon[trade.id]=setInterval(poll, MON_POLL_MS);
 }
 
+// On TP/SL hit: place a real SELL @ MKT to close the position. If the
+// SELL fails (network, margin, market-hours), leave the trade OPEN and
+// alert — never mark a position closed locally while the broker still
+// shows it as live.
 async function exitT(trade,res,ex){
+  let exitOrdNo = null;
+  if(!trade.isPaper && G.sid && trade.symbol){
+    try{
+      const er = await api('/orders/place',{
+        session_id:G.sid, trading_symbol:trade.symbol,
+        transaction_type:'S', quantity:String(trade.qty),
+        order_type:'MKT', exchange_segment:'nse_fo', product:'NRML'
+      });
+      if(er.stat === 'Ok'){
+        exitOrdNo = er.nOrdNo;
+        log('✓ EXIT SELL placed for '+trade.symbol+' OrdNo:'+er.nOrdNo,'success');
+      } else {
+        const code = er.stCode || er.errCode || er.code;
+        const msg  = er.emsg || er.errMsg || er.message || er.error || 'unknown';
+        log('🚨 EXIT FAILED for '+trade.symbol+' '+(code?'['+code+'] ':'')+msg+' — position STILL OPEN at broker. Manual exit required.','error');
+        // Restart the monitor so we keep watching the live position.
+        delete mon[trade.id];
+        startMon(trade);
+        return;
+      }
+    }catch(e){
+      log('🚨 EXIT NETWORK ERROR for '+trade.symbol+': '+e.message+' — position STILL OPEN at broker. Manual exit required.','error');
+      delete mon[trade.id];
+      startMon(trade);
+      return;
+    }
+  }
+
   const pnl=(ex-trade.entryPrice)*trade.qty;
   G.open=G.open.filter(t=>t.id!==trade.id);
-  G.done.push({...trade,exitPrice:ex.toFixed(2),pnl,status:res,exitTime:new Date().toLocaleTimeString('en-IN',{hour12:false})});
+  G.done.push({...trade,exitPrice:ex.toFixed(2),pnl,status:res,exitOrdNo,exitTime:new Date().toLocaleTimeString('en-IN',{hour12:false})});
   G.pnl+=pnl;
   log(`${res==='WIN'?'✓ TARGET':'✗ SL HIT'}: ${trade.symbol} | Exit ₹${ex.toFixed(2)} | P&L ₹${pnl.toFixed(0)}`,res==='WIN'?'success':'error');
   render(); stats();
@@ -1149,9 +1246,7 @@ async function squareOff(){
 buildChain(); chkServer();
 log('NEXUS Bot v3 ready — Real Kotak API connected.','info');
 log('Tap WALLET → authenticate → real NIFTY price feeds automatically.','info');
-if(!LIVE_MONITOR_READY){
-  log('⚠ AUDIT P0: Position monitor is SIMULATED (Math.random drift). Live order submission is blocked until startMon() polls real Kotak option LTPs. Paper trades still work.','warn');
-}
+log('Position monitor: REAL Kotak LTP polling every '+ (typeof MON_POLL_MS!=='undefined'?MON_POLL_MS:3000) +' ms. Exits place a real SELL @ MKT.','info');
 </script>
 </body>
 </html>
