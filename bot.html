@@ -139,6 +139,7 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
     <div style="display:flex;align-items:center;gap:8px;font-size:10px;justify-content:flex-end;margin-top:3px">
       <span><span class="dot off" id="sDot"></span><span id="sLbl">SERVER</span></span>
       <span><span class="dot off" id="aDot"></span><span id="aLbl">AUTH</span></span>
+      <span title="Order placement authority. Run TEST ORDER once to verify the Kotak account can actually place trades from this server."><span class="dot off" id="tDot"></span><span id="tLbl">TRADE✗</span></span>
       <span><span class="dot off" id="bDot"></span><span id="bLbl">BOT</span></span>
     </div>
   </div>
@@ -368,7 +369,8 @@ const LS = {NIFTY:75,BANKNIFTY:30,FINNIFTY:65,MIDCPNIFTY:75};
 const G = {
   sid:null, spot:{NIFTY:24350,BANKNIFTY:52100,FINNIFTY:23800,MIDCPNIFTY:12400},
   inst:"NIFTY", lots:1, chain:[], selRow:null, sig:null,
-  botOn:false, botIv:null, open:[], done:[], pnl:0, logN:0, wallet:null
+  botOn:false, botIv:null, open:[], done:[], pnl:0, logN:0, wallet:null,
+  orderAuthVerified:false
 };
 const mon = {};
 
@@ -462,6 +464,11 @@ async function testKotakOrder(){
     if(res.success){
       log('✅ ORDER ACCEPTED by Kotak. OrdNo: '+res.place.order_no+'. The Railway IP can trade — no whitelist needed.','success');
       log('Cancel result: '+JSON.stringify(res.cancel).substring(0,200),'info');
+      // Unlock the order-auth gate. Live trades can now go to Kotak.
+      G.orderAuthVerified = true;
+      const tD=document.getElementById('tDot'), tL=document.getElementById('tLbl');
+      if(tD){tD.className='dot on';} if(tL){tL.textContent='TRADE✓';}
+      log('🔓 Order-auth gate UNLOCKED — live trades will now be sent to Kotak.','success');
     } else {
       log('❌ ORDER REJECTED at stage='+(res.stage||'place')+' — '+(res.rejected_reason||'see body'),'error');
       log('HTTP '+res.place?.http_status+' ('+(res.place?.content_type||'?')+'): '+(res.place?.body_snippet||'').substring(0,300),'warn');
@@ -601,6 +608,11 @@ async function doS2(){
 
 function doLogout(){
   G.sid=null;
+  // Order-auth was tied to this Kotak session — invalidate on logout so
+  // the user must re-run TEST ORDER after re-authenticating.
+  G.orderAuthVerified=false;
+  document.getElementById('tDot').className='dot off';
+  document.getElementById('tLbl').textContent='TRADE✗';
   document.getElementById('aDone').style.display='none';
   document.getElementById('aS1').style.display='block';
   document.getElementById('s1Btn').disabled=false;
@@ -742,7 +754,13 @@ async function placeOrder(side,rowOvr){
   }
 
   log(`Placing: BUY ${qty}×${sym} @ MKT | TP:${tp} SL:${sl}`,'trade');
-  if(G.sid){
+  // Order-auth gate. The Kotak order endpoint can return 401 unauthorized
+  // even when login + read APIs work (IP whitelist or deactivated F&O
+  // segment). Refuse to hit /orders/place until a TEST ORDER has succeeded
+  // — otherwise we'd silently no-op every trade while the bot 'looks' fine.
+  if(G.sid && !G.orderAuthVerified){
+    log('🛑 LIVE TRADE BLOCKED — order auth not verified. Run TEST ORDER once (LOG tab) to unlock. Tracking as PAPER trade.','error');
+  } else if(G.sid){
     try{
       const res=await api('/orders/place',{session_id:G.sid,trading_symbol:sym,transaction_type:'B',quantity:String(qty),order_type:'MKT',exchange_segment:'nse_fo',product:'NRML'});
       if(res.stat==='Ok') log('✓ Order placed! OrdNo: '+res.nOrdNo,'success');
@@ -875,6 +893,23 @@ async function analyze(){
     data_source: md_real.source || (md_real.ltp ? 'REAL_KOTAK_API' : 'SIMULATED')
   };
   log(`Sending to Claude: chg=${md.intraday_change_pct}% mom5m=${md.momentum_5m_pct}% ticks=${md.ticks_observed} vix=${md.vix}`,'info');
+
+  // Local tick-freshness guard — short-circuits before the LLM call.
+  // Claude's own rule says <6 ticks → WAIT, but evaluating that costs a
+  // round trip + tokens. Check it here instead and skip the API call.
+  if(ticksCount < 6){
+    const de=document.getElementById('sigDir');
+    de.textContent='WAIT'; de.className='sig-big sig-idle';
+    document.getElementById('sigReason').textContent=`Warming up — only ${ticksCount} ticks (need 6+, ~30s).`;
+    const sb=document.getElementById('sigBadge');
+    sb.textContent='WAIT · WARMUP'; sb.className='badge bd';
+    document.getElementById('lastScan').textContent='Last: '+new Date().toLocaleTimeString('en-IN',{hour12:false})+' · Auto every 60s when bot ON';
+    log(`WAIT cause: only ${ticksCount} ticks (need 6+, ~30s) — skipped Claude call.`,'warn');
+    G.sig = {direction:'WAIT', confidence:0};
+    btn.disabled=false; btn.textContent='⟳ ANALYZE NOW';
+    return;
+  }
+
   try{
     const res=await fetch(CLAUDE,{method:'POST',headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:500,messages:[{role:'user',content:`You are an expert NSE F&O intraday options trader. Decide whether to buy a CE (bullish), buy a PE (bearish), or WAIT, based on the REAL price action below. Work from price action ONLY — do not fabricate readings.
 
