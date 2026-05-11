@@ -604,6 +604,94 @@ async def get_market_data(req: QuoteRequest):
     }
 
 
+# ── PER-OPTION LTP (used by the position monitor for real TP/SL) ────────────
+class OptionLtpRequest(BaseModel):
+    session_id: str
+    p_symbol:   str      # neosymbol form, e.g. "NIFTY25MAY24500CE"
+    exchange:   str = "nse_fo"
+
+
+@app.post("/quotes/option_ltp")
+async def option_ltp(req: OptionLtpRequest):
+    """LTP for a single option contract. Used by startMon() to poll real
+    market prices instead of simulating drift. Returns {"ltp": float, "ok": bool}.
+    """
+    sess = get_session(req.session_id)
+    async with httpx.AsyncClient(timeout=10) as c:
+        ltp, err = await _ltp_via_script_details(c, sess, req.p_symbol, req.exchange)
+    if ltp is None or ltp <= 0:
+        return {"ok": False, "ltp": 0, "error": err or "no data"}
+    return {"ok": True, "ltp": ltp}
+
+
+# ── STRIKE RESOLUTION (frontend calls this right before placing an order) ────
+class ResolveStrikeRequest(BaseModel):
+    session_id: str
+    instrument: str               # NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY
+    strike:     float
+    side:       str               # "CE" or "PE"
+
+
+@app.post("/chain/resolve_strike")
+async def resolve_strike(req: ResolveStrikeRequest):
+    """Resolve a strike+side to a real Kotak option contract.
+
+    Returns the trading-symbol (`p_trd_symbol`, used in /orders/place), the
+    neosymbol (`p_symbol`, used for LTP polling), the lot size and the live
+    LTP. Required because the displayed option chain in bot.html is a local
+    Black-Scholes approximation — it has no real Kotak symbols. Live trades
+    pull the real contract via this endpoint at order time.
+    """
+    sess = get_session(req.session_id)
+    inst = INSTRUMENT_TOKENS.get(req.instrument.upper())
+    if not inst:
+        raise HTTPException(status_code=400, detail=f"Unknown instrument: {req.instrument}")
+
+    side = req.side.upper()
+    if side not in ("CE", "PE"):
+        raise HTTPException(status_code=400, detail="side must be CE or PE")
+
+    # 1. Spot — we feed it into find_atm_chain so it can pick the nearest expiry
+    #    and a strike window that contains the requested strike.
+    async with httpx.AsyncClient(timeout=10) as c:
+        spot, err = await _ltp_via_script_details(c, sess, inst["neo_symbol"], inst["exchange_segment"])
+        if not spot or spot <= 0:
+            return {"ok": False, "error": f"spot fetch failed: {err}"}
+
+    # 2. Pull the chain wide enough to contain the requested strike.
+    step = 100 if req.instrument.upper() == "BANKNIFTY" else 50
+    n = max(6, int(abs(req.strike - spot) / step) + 2)
+    try:
+        chain_meta = await scrip_master.find_atm_chain(sess, req.instrument, spot, n=n)
+    except Exception as e:
+        return {"ok": False, "error": f"scrip master: {e}"}
+
+    row = next((r for r in chain_meta["strikes"] if r["strike"] == req.strike), None)
+    if not row:
+        return {"ok": False, "error": f"strike {req.strike} not in chain"}
+    leg = row.get("ce") if side == "CE" else row.get("pe")
+    if not leg:
+        return {"ok": False, "error": f"no {side} leg for strike {req.strike}"}
+
+    # 3. Live LTP for this specific option leg.
+    async with httpx.AsyncClient(timeout=10) as c:
+        ltp, err = await _ltp_via_script_details(c, sess, leg["p_symbol"], "nse_fo")
+    if ltp is None or ltp <= 0:
+        return {"ok": False, "error": f"option ltp: {err or 'no data'}"}
+
+    return {
+        "ok":            True,
+        "p_trd_symbol":  leg["p_trd_symbol"],
+        "p_symbol":      leg["p_symbol"],
+        "lot_size":      leg["lot_size"],
+        "ltp":           ltp,
+        "expiry":        chain_meta.get("expiry"),
+        "spot":          spot,
+        "strike":        req.strike,
+        "side":          side,
+    }
+
+
 @app.post("/quotes/stream_status")
 async def stream_status(req: SessionRequest):
     """Inspect the WebSocket streamer for a session — connection state,
