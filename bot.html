@@ -404,6 +404,37 @@ setInterval(()=>{
 G.marketData = {}; // stores real OHLC, change, vix per instrument
 G.liveDataInterval = null;
 
+// Quote-stream watchdog state. The browser polls /quotes/market_data every
+// 5 s. Transient blips happen; persistent ones mean our decisions would be
+// based on stale prices. We track consecutive fails and escalate visibly.
+G.quoteFailStreak = 0;
+G.quoteStale      = false;
+G.lastQuoteAt     = 0;
+function _onQuoteOk(){
+  G.quoteFailStreak = 0; G.lastQuoteAt = Date.now();
+  if(G.quoteStale){
+    G.quoteStale = false;
+    const aD=document.getElementById('aDot'), aL=document.getElementById('aLbl');
+    if(G.sid){aD.className='dot on'; aL.textContent='LIVE';}
+    log('✓ Quote stream recovered.','success');
+  }
+}
+function _onQuoteFail(reason){
+  G.quoteFailStreak += 1;
+  // 3 consecutive fails = amber warning, mark stream stale.
+  if(G.quoteFailStreak === 3){
+    G.quoteStale = true;
+    const aD=document.getElementById('aDot'), aL=document.getElementById('aLbl');
+    aD.className='dot off'; aL.textContent='STALE';
+    log('⚠ QUOTE STREAM STALE: 3 consecutive fetch failures ('+reason+'). LTPs may be old. Bot decisions disabled until stream recovers.','error');
+  }
+  // 6 consecutive = auto-halt bot to prevent trades on stale prices.
+  if(G.quoteFailStreak === 6 && G.botOn){
+    log('🛑 AUTO-HALTING BOT — 6 quote failures in a row. Resume manually once stream is healthy.','error');
+    if(typeof stopBot === 'function') stopBot();
+  }
+}
+
 async function fetchLiveMarketData(){
   if(!G.sid){ return; }
   try{
@@ -423,12 +454,14 @@ async function fetchLiveMarketData(){
       if(res.vix && res.vix>0) G.liveVix=res.vix;
       buildChain();
       log('✅ REAL: '+G.inst+' ₹'+res.ltp.toFixed(2)+' | Chg:'+(chng>=0?'+':'')+chng.toFixed(2)+'% | VIX:'+(res.vix?res.vix.toFixed(2):'—'),'success');
+      _onQuoteOk();
     } else {
       // API returned 0 or no data — log what we got
       log('Quote returned 0 (items:'+res.raw_count+') — check LOG tab. Using last price.','warn');
       // Keep last known price, just small drift
       G.spot[G.inst] = +(G.spot[G.inst]+(Math.random()-.49)*2).toFixed(2);
       buildChain();
+      _onQuoteFail('empty payload');
     }
   }catch(e){
     if(e.message !== 'RATE_LIMITED'){
@@ -436,6 +469,7 @@ async function fetchLiveMarketData(){
     }
     G.spot[G.inst] = +(G.spot[G.inst]+(Math.random()-.49)*2).toFixed(2);
     buildChain();
+    _onQuoteFail(e.message || 'unknown');
   }
 }
 
@@ -754,17 +788,38 @@ async function placeOrder(side,rowOvr){
   }
 
   log(`Placing: BUY ${qty}×${sym} @ MKT | TP:${tp} SL:${sl}`,'trade');
-  // Order-auth gate. The Kotak order endpoint can return 401 unauthorized
-  // even when login + read APIs work (IP whitelist or deactivated F&O
-  // segment). Refuse to hit /orders/place until a TEST ORDER has succeeded
-  // — otherwise we'd silently no-op every trade while the bot 'looks' fine.
-  if(G.sid && !G.orderAuthVerified){
+  // Two-gate guard before sending anything to Kotak:
+  //  1. Order auth verified via TEST ORDER (proves the account/IP can trade).
+  //  2. LIVE_MONITOR_READY — the position monitor uses Math.random() drift,
+  //     not real LTPs, so TP/SL hits would be coin flips. Until that's
+  //     wired to real Kotak option quotes, we refuse live trades.
+  if(G.sid && !LIVE_MONITOR_READY){
+    log('🛑 LIVE TRADE BLOCKED — position monitor is SIMULATED (Math.random drift, not real LTPs). TP/SL would not reflect market. Tracking as PAPER trade. See P0 in audit.','error');
+  } else if(G.sid && !G.orderAuthVerified){
     log('🛑 LIVE TRADE BLOCKED — order auth not verified. Run TEST ORDER once (LOG tab) to unlock. Tracking as PAPER trade.','error');
+  } else if(G.sid && G.quoteStale){
+    log('🛑 LIVE TRADE BLOCKED — quote stream stale, refusing to act on old prices.','error');
   } else if(G.sid){
     try{
       const res=await api('/orders/place',{session_id:G.sid,trading_symbol:sym,transaction_type:'B',quantity:String(qty),order_type:'MKT',exchange_segment:'nse_fo',product:'NRML'});
-      if(res.stat==='Ok') log('✓ Order placed! OrdNo: '+res.nOrdNo,'success');
-      else log('Order error: '+(res.emsg||'?'),'error');
+      if(res.stat==='Ok'){
+        log('✓ Order placed! OrdNo: '+res.nOrdNo,'success');
+      } else {
+        // Try to surface an actionable cause from Kotak's response shape.
+        const code = res.stCode || res.errCode || res.code;
+        const msg  = res.emsg || res.errMsg || res.message || res.error || 'unknown';
+        let hint = '';
+        if(code === 100008 || /unauthor/i.test(msg)){
+          hint = ' — likely cause: IP whitelist OR F&O segment not active on Kotak account. See email draft.';
+        } else if(/margin/i.test(msg)){
+          hint = ' — likely cause: insufficient margin. Check WALLET.';
+        } else if(/closed|hours|session/i.test(msg)){
+          hint = ' — market session may be closed.';
+        } else if(/symbol|scrip|instrument/i.test(msg)){
+          hint = ' — bad trading symbol. Rebuild chain.';
+        }
+        log('Order error '+(code?'['+code+'] ':'')+msg+hint,'error');
+      }
     }catch(e){log('Order failed: '+e.message,'error');}
   }else log('[NO KOTAK SESSION] Tracked locally.','warn');
   const trade={id:tid,symbol:sym,side,qty,lots:G.lots,entryPrice:ltp,currentLTP:ltp,tp,sl,pnl:0,pnlPct:0,entry:new Date().toLocaleTimeString('en-IN',{hour12:false}),status:'OPEN'};
@@ -772,6 +827,14 @@ async function placeOrder(side,rowOvr){
   document.getElementById('orderBox').style.display='none';
   startMon(trade); render(); gt('orders');
 }
+
+// ⚠ MONITOR_IS_SIMULATED — read this before flipping LIVE_MONITOR_READY.
+// startMon() drifts t.currentLTP by Math.random(), NOT the option's real
+// Kotak LTP. That means on a real position the TP/SL hits below are coin
+// flips, not market triggers. Until startMon polls a real per-option
+// quote endpoint and feeds that into t.currentLTP, live order submission
+// is gated by LIVE_MONITOR_READY (see placeOrder).
+const LIVE_MONITOR_READY = false;
 
 // ── MONITOR ───────────────────────────────────────────────────────────────
 function startMon(trade){
@@ -1086,6 +1149,9 @@ async function squareOff(){
 buildChain(); chkServer();
 log('NEXUS Bot v3 ready — Real Kotak API connected.','info');
 log('Tap WALLET → authenticate → real NIFTY price feeds automatically.','info');
+if(!LIVE_MONITOR_READY){
+  log('⚠ AUDIT P0: Position monitor is SIMULATED (Math.random drift). Live order submission is blocked until startMon() polls real Kotak option LTPs. Paper trades still work.','warn');
+}
 </script>
 </body>
 </html>
