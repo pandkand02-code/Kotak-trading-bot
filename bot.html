@@ -203,7 +203,7 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
   <!-- SIGNAL -->
   <div id="t-signal">
     <!-- Real-time chart from TradingView's free embed widget. Symbol swaps
-         with G.inst (NIFTY / BANKNIFTY / FINNIFTY / SENSEX). Lives at the
+         with G.inst (NIFTY → NSE:NIFTY, SENSEX → BSE:SENSEX). Lives at the
          top of SIGNAL so the bot's call is visible alongside the price
          action that drove it. -->
     <div class="card">
@@ -253,7 +253,7 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
         <div class="irow">
           <span class="ilbl">Instrument</span>
           <select id="inst" style="width:auto;margin:0;padding:4px 8px" onchange="onInst()">
-            <option>NIFTY</option><option>BANKNIFTY</option><option>FINNIFTY</option><option>MIDCPNIFTY</option><option>SENSEX</option>
+            <option>NIFTY</option><option>SENSEX</option>
           </select>
         </div>
         <div class="irow" style="margin-top:10px">
@@ -415,9 +415,11 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
 // ── STATE ──────────────────────────────────────────────────────────────────
 const BASE = window.location.origin;
 const CLAUDE = "https://api.anthropic.com/v1/messages";
-const LS = {NIFTY:75,BANKNIFTY:30,FINNIFTY:65,MIDCPNIFTY:75};
+// Lot sizes per index. SENSEX weekly options ship a 20-lot. Scrip-master
+// returns the authoritative lot per leg — these are header-display only.
+const LS = {NIFTY:75, SENSEX:20};
 const G = {
-  sid:null, spot:{NIFTY:24350,BANKNIFTY:52100,FINNIFTY:23800,MIDCPNIFTY:12400},
+  sid:null, spot:{NIFTY:24350, SENSEX:80000},
   inst:"NIFTY", lots:1, chain:[], selRow:null, sig:null,
   botOn:false, botIv:null, open:[], done:[], pnl:0, logN:0, wallet:null,
   orderAuthVerified:false,
@@ -592,12 +594,11 @@ function startLiveFeed(){
     fetchLiveMarketData(); // immediate first call
     G.liveDataInterval = setInterval(fetchLiveMarketData, 5000); // every 5 seconds
   } else {
-    // Simulated fallback when not authenticated
+    // Simulated fallback when not authenticated — only the two
+    // benchmarks the bot trades. Tick = small random drift around last.
     G.liveDataInterval = setInterval(()=>{
-      G.spot.NIFTY=      +(G.spot.NIFTY+      (Math.random()-.49)*8).toFixed(2);
-      G.spot.BANKNIFTY=  +(G.spot.BANKNIFTY+  (Math.random()-.49)*20).toFixed(2);
-      G.spot.FINNIFTY=   +(G.spot.FINNIFTY+   (Math.random()-.49)*10).toFixed(2);
-      G.spot.MIDCPNIFTY= +(G.spot.MIDCPNIFTY+ (Math.random()-.49)*5).toFixed(2);
+      G.spot.NIFTY  = +(G.spot.NIFTY  + (Math.random()-.49)*8 ).toFixed(2);
+      G.spot.SENSEX = +(G.spot.SENSEX + (Math.random()-.49)*25).toFixed(2);
       const s=G.spot[G.inst];
       const el=document.getElementById('spotEl');
       el.textContent=G.inst+' '+s.toFixed(2)+' (SIMULATED)';
@@ -898,55 +899,44 @@ function _renderChain(){
   }).join('');
 }
 
-// ── TRADINGVIEW CHART (free embed widget) ─────────────────────────────────
-// Free, real-time, supplied by TradingView's own data feed. Symbol swaps
-// when G.inst changes — NIFTY → NSE:NIFTY, BANKNIFTY → NSE:BANKNIFTY,
-// FINNIFTY → NSE:FINNIFTY, MIDCPNIFTY → NSE:MIDCPNIFTY. SENSEX support
-// added on the same control via instrument override.
+// ── TRADINGVIEW CHART (free embed widget, iframe URL) ─────────────────────
+// We restrict the bot to two benchmarks — NIFTY 50 (NSE) and SENSEX (BSE).
+// Iframe embed is used instead of TradingView's script injection because
+// the dynamic-script form falls back to its hardcoded default symbol
+// (AAPL) when its inline JSON config isn't read in the right order — a
+// known quirk of `embed-widget-advanced-chart.js`. The iframe URL puts
+// the symbol in the query string, so it cannot be overridden.
 G.chartTf = 5;     // minutes per candle
 function _tvSymbol(){
-  return ({
-    NIFTY:        'NSE:NIFTY',
-    BANKNIFTY:    'NSE:BANKNIFTY',
-    FINNIFTY:     'NSE:CNXFINANCE',
-    MIDCPNIFTY:   'NSE:NIFTY_MID_SELECT',
-    SENSEX:       'BSE:SENSEX',
-  })[G.inst] || 'NSE:NIFTY';
+  return G.inst === 'SENSEX' ? 'BSE:SENSEX' : 'NSE:NIFTY';
 }
 function mountChart(){
   const sym = _tvSymbol();
+  const tf  = G.chartTf || 5;
   document.getElementById('tvSymLbl').textContent = G.inst;
   const host = document.getElementById('tvChart');
   if(!host) return;
-  // Wipe + re-mount. TV's widget script is fire-and-forget; we re-inject
-  // on every symbol/timeframe change so the chart actually swaps.
+  // Use TradingView's widgetembed iframe. Studies pinned to EMA + RSI.
+  const params = new URLSearchParams({
+    symbol:           sym,
+    interval:         String(tf),
+    theme:            'dark',
+    style:            '1',                  // candlesticks
+    timezone:         'Asia/Kolkata',
+    locale:           'in',
+    hide_side_toolbar: '1',
+    hide_top_toolbar:  '0',
+    hide_legend:       '0',
+    save_image:        '0',
+    studies:           '["STD;EMA","STD;RSI"]',
+    backgroundColor:   '%23000000',
+    gridColor:         '%231c1c1c',
+  });
   host.innerHTML =
-    '<div class="tradingview-widget-container" style="height:100%;width:100%">'+
-      '<div id="tvW" style="height:100%;width:100%"></div>'+
-    '</div>';
-  const cfg = {
-    autosize:       true,
-    symbol:         sym,
-    interval:       String(G.chartTf),
-    timezone:       'Asia/Kolkata',
-    theme:          'dark',
-    style:          '1',          // candles
-    locale:         'in',
-    enable_publishing: false,
-    backgroundColor:'#000000',
-    gridColor:      '#1c1c1c',
-    hide_top_toolbar: false,
-    hide_legend:    false,
-    save_image:     false,
-    container_id:   'tvW',
-    studies:        ['STD;EMA','STD;RSI'],
-    support_host:   'https://www.tradingview.com'
-  };
-  const s = document.createElement('script');
-  s.async = true;
-  s.src   = 'https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js';
-  s.text  = JSON.stringify(cfg);
-  host.querySelector('.tradingview-widget-container').appendChild(s);
+    `<iframe src="https://s.tradingview.com/widgetembed/?${params.toString()}" `+
+    `style="width:100%;height:100%;border:0;background:#000" `+
+    `allowtransparency="true" frameborder="0" scrolling="no" `+
+    `allow="clipboard-write" referrerpolicy="no-referrer"></iframe>`;
 }
 function setChartTf(btn, m){
   G.chartTf = m;
@@ -958,7 +948,7 @@ function setChartTf(btn, m){
 async function buildChain(){
   // No session yet → local Black-Scholes synth so the UI is non-blank.
   if(!G.sid){
-    const inst=G.inst,sp=G.spot[inst],step=inst==='BANKNIFTY'?100:50;
+    const inst=G.inst,sp=G.spot[inst],step=inst==='SENSEX'?100:50;
     const atm=Math.round(sp/step)*step,T=dte(),r=.065;
     G.chain=Array.from({length:11},(_,i)=>{
       const k=atm+(i-5)*step,m=(k-atm)/atm;
@@ -1056,9 +1046,10 @@ async function placeOrder(side,rowOvr){
     }catch(e){log('STEP 1/5 ERR — '+e.message,'error'); return;}
   }
   // Real values from Kotak (paper-mode falls back to chain UI values).
-  const ltp        = resolved ? resolved.ltp           : parseFloat(side==='CE'?row.ce.ltp:row.pe.ltp);
-  const realSymbol = resolved ? resolved.p_trd_symbol  : (G.inst+row.strike+side);
-  const pSymbol    = resolved ? resolved.p_symbol      : null;
+  const ltp        = resolved ? resolved.ltp                          : parseFloat(side==='CE'?row.ce.ltp:row.pe.ltp);
+  const realSymbol = resolved ? resolved.p_trd_symbol                 : (G.inst+row.strike+side);
+  const pSymbol    = resolved ? resolved.p_symbol                     : null;
+  const exchSeg    = resolved ? (resolved.exchange_segment || 'nse_fo'): (G.inst==='SENSEX'?'bse_fo':'nse_fo');
   const tp = +(ltp*(1+parseFloat(document.getElementById('tpS').value)/100)).toFixed(2);
   const sl = +(ltp*(1-parseFloat(document.getElementById('slS').value)/100)).toFixed(2);
 
@@ -1084,7 +1075,7 @@ async function placeOrder(side,rowOvr){
     log('🛑 LIVE TRADE BLOCKED — quote stream stale, refusing to act on old prices.','error');
   } else if(G.sid){
     try{
-      const res=await api('/orders/place',{session_id:G.sid,trading_symbol:realSymbol,transaction_type:'B',quantity:String(qty),order_type:'MKT',exchange_segment:'nse_fo',product:'NRML'});
+      const res=await api('/orders/place',{session_id:G.sid,trading_symbol:realSymbol,transaction_type:'B',quantity:String(qty),order_type:'MKT',exchange_segment:exchSeg,product:'NRML'});
       log('STEP 4/5 Kotak responded — stat='+(res.stat||'?')+' stCode='+(res.stCode||'-')+' ordNo='+(res.nOrdNo||'-'),'info');
       if(res.stat==='Ok'){
         liveOrdNo = res.nOrdNo;
@@ -1120,9 +1111,10 @@ async function placeOrder(side,rowOvr){
     pnl:0, pnlPct:0,
     entry:new Date().toLocaleTimeString('en-IN',{hour12:false}),
     status:'OPEN',
-    pSymbol,            // for /quotes/option_ltp polling
+    pSymbol,             // for /quotes/option_ltp polling
+    exchSeg,             // for the matching SELL on exit (nse_fo / bse_fo)
     entryOrdNo: liveOrdNo,
-    isPaper: !liveOrdNo // paper trades fall back to simulated drift
+    isPaper: !liveOrdNo  // paper trades fall back to simulated drift
   };
   G.open.push(trade); G.selRow=null;
   document.getElementById('orderBox').style.display='none';
@@ -1157,7 +1149,7 @@ function startMon(trade){
     } else {
       // Live trade: poll the real Kotak LTP for this option contract.
       try{
-        const r = await api('/quotes/option_ltp',{session_id:G.sid, p_symbol:t.pSymbol, exchange:'nse_fo'});
+        const r = await api('/quotes/option_ltp',{session_id:G.sid, p_symbol:t.pSymbol, exchange:(t.exchSeg||'nse_fo')});
         if(r.ok && r.ltp > 0){
           t.currentLTP = r.ltp;
           t._failStreak = 0;
@@ -1200,7 +1192,7 @@ async function exitT(trade,res,ex){
       const er = await api('/orders/place',{
         session_id:G.sid, trading_symbol:trade.symbol,
         transaction_type:'S', quantity:String(trade.qty),
-        order_type:'MKT', exchange_segment:'nse_fo', product:'NRML'
+        order_type:'MKT', exchange_segment:(trade.exchSeg || 'nse_fo'), product:'NRML'
       });
       if(er.stat === 'Ok'){
         exitOrdNo = er.nOrdNo;
@@ -1599,7 +1591,7 @@ async function dispatchAutoTrade(){
     log('Auto-trade SKIP — cooldown '+Math.ceil((G.cooldownMs-sinceLast)/1000)+'s remaining','info'); return;
   }
   // 4. Pick the ATM strike row.
-  const step = G.inst==='BANKNIFTY'?100:50;
+  const step = G.inst==='SENSEX'?100:50;
   const atm  = Math.round(G.spot[G.inst]/step)*step;
   const ar   = G.chain.find(r => r.strike === atm);
   if(!ar){ log('Auto-trade SKIP — no chain row for ATM '+atm,'warn'); return; }

@@ -132,9 +132,14 @@ class ScripMaster:
         spot: float,
         n: int = 5,
         step: int | None = None,
+        segment: str | None = None,
     ) -> dict:
-        """Return ATM±n strikes (CE+PE) for the nearest expiry of `symbol`."""
-        opts = await self.options_for(sess, symbol)
+        """Return ATM±n strikes (CE+PE) for the nearest expiry of `symbol`.
+
+        `segment` defaults to nse_fo; SENSEX needs bse_fo.
+        """
+        seg = segment or ("bse_fo" if symbol.upper() == "SENSEX" else "nse_fo")
+        opts = await self.options_for(sess, symbol, segment=seg)
         if not opts:
             return {"atm": 0, "expiry": "", "strikes": []}
 
@@ -164,7 +169,7 @@ class ScripMaster:
 
         chain_opts = [o for o in opts if o["expiry"] == nearest]
         if step is None:
-            step = 100 if symbol.upper() == "BANKNIFTY" else 50
+            step = 100 if symbol.upper() in ("BANKNIFTY", "SENSEX") else 50
         atm_strike = round(spot / step) * step
         wanted = {atm_strike + (i - n) * step for i in range(2 * n + 1)}
 

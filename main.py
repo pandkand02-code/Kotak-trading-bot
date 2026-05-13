@@ -700,6 +700,12 @@ async def option_ltp(req: OptionLtpRequest):
 
 
 # ── STRIKE RESOLUTION (frontend calls this right before placing an order) ────
+def _fo_segment(instrument: str) -> str:
+    """Map underlying → F&O exchange segment. NIFTY/BANKNIFTY/FINNIFTY etc.
+    sit on Kotak's nse_fo; SENSEX (and other BSE indices) on bse_fo."""
+    return "bse_fo" if instrument.upper() == "SENSEX" else "nse_fo"
+
+
 class ResolveStrikeRequest(BaseModel):
     session_id: str
     instrument: str               # NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY
@@ -749,8 +755,9 @@ async def resolve_strike(req: ResolveStrikeRequest):
         return {"ok": False, "error": f"no {side} leg for strike {req.strike}"}
 
     # 3. Live LTP for this specific option leg.
+    fo_seg = _fo_segment(req.instrument)
     async with httpx.AsyncClient(timeout=10) as c:
-        ltp, err = await _ltp_via_script_details(c, sess, leg["p_symbol"], "nse_fo")
+        ltp, err = await _ltp_via_script_details(c, sess, leg["p_symbol"], fo_seg)
     if ltp is None or ltp <= 0:
         return {"ok": False, "error": f"option ltp: {err or 'no data'}"}
 
@@ -764,6 +771,7 @@ async def resolve_strike(req: ResolveStrikeRequest):
         "spot":          spot,
         "strike":        req.strike,
         "side":          side,
+        "exchange_segment": fo_seg,
     }
 
 
@@ -953,11 +961,12 @@ async def chain_atm(req: ChainRequest):
         for r in chain_meta["strikes"]
     }
 
+    fo_seg = _fo_segment(req.instrument)
     async with httpx.AsyncClient(timeout=15) as c:
         for i in range(0, len(legs), 8):
             batch = legs[i:i + 8]
             results = await asyncio.gather(*[
-                _ltp_via_script_details(c, sess, leg["p_symbol"], "nse_fo")
+                _ltp_via_script_details(c, sess, leg["p_symbol"], fo_seg)
                 for _, _, leg in batch
             ], return_exceptions=True)
             for (strike_key, side, leg), result in zip(batch, results):
@@ -1222,7 +1231,9 @@ async def test_place(req: TestPlaceRequest):
     ce = atm_row["ce"]
     pTrdSymbol = ce["p_trd_symbol"]
     pSymbol    = ce["p_symbol"]
-    lot_size   = ce["lot_size"] or (75 if req.instrument.upper() == "NIFTY" else 35)
+    fo_seg     = _fo_segment(req.instrument)
+    default_lot = 20 if req.instrument.upper() == "SENSEX" else 75
+    lot_size   = ce["lot_size"] or default_lot
     qty        = req.qty_lots * lot_size
 
     # 2. Fetch the option's real LTP. We use this to set a sane limit price
@@ -1232,7 +1243,7 @@ async def test_place(req: TestPlaceRequest):
     #    circuit and is itself rejected as out-of-range, which can manifest
     #    as the same opaque 'unauthorized' response we are trying to test.
     async with httpx.AsyncClient(timeout=10) as c:
-        opt_ltp, _ = await _ltp_via_script_details(c, sess, pSymbol, "nse_fo")
+        opt_ltp, _ = await _ltp_via_script_details(c, sess, pSymbol, fo_seg)
     safe_limit = req.price
     if opt_ltp and opt_ltp > 0:
         safe_limit = max(0.05, round(opt_ltp * 0.6, 2))
@@ -1241,7 +1252,7 @@ async def test_place(req: TestPlaceRequest):
     #    body — so any IP-whitelist or permissions error is visible.
     place_url = f"{sess['base_url']}/quick/order/rule/ms/place"
     jData = {
-        "am": "NO", "dq": "0", "es": "nse_fo", "mp": "0",
+        "am": "NO", "dq": "0", "es": fo_seg, "mp": "0",
         "pc": "MIS", "pf": "N",
         "pr": f"{safe_limit:.2f}",
         "pt": "L",                  # LIMIT
