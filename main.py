@@ -1019,13 +1019,24 @@ async def place_order(req: OrderRequest):
     })
     logger.info(f"order/place pre: ts={req.trading_symbol} tt={req.transaction_type} qt={req.quantity} pt={req.order_type}")
 
+    # Raw-string body. Critical for Kotak: passing `data={"jData": ...}` makes
+    # httpx URL-encode the JSON ({ → %7B, " → %22 …) and Kotak's order
+    # endpoint does not URL-decode the form value, so the request is silently
+    # rejected as malformed (manifests as HTTP 401 stCode 100008
+    # 'unauthorized'). The user's working Python reference (requests.post,
+    # data=f"jData={json.dumps(...)}") sends the JSON literal — we match that
+    # exact byte-pattern here via httpx.content=.
+    body = f"jData={json.dumps(jData)}"
+    debug[-1]["body_size"] = len(body)
     async with httpx.AsyncClient(timeout=15) as c:
         t0 = time.monotonic()
         try:
             r = await c.post(url,
-                headers={"Auth": sess["session_token"], "Sid": sess["session_sid"],
-                         "neo-fin-key": NEO_FIN_KEY, "Content-Type": "application/x-www-form-urlencoded"},
-                data={"jData": json.dumps(jData)})
+                headers={"accept": "application/json",
+                         "Auth": sess["session_token"], "Sid": sess["session_sid"],
+                         "neo-fin-key": NEO_FIN_KEY,
+                         "Content-Type": "application/x-www-form-urlencoded"},
+                content=body)
         except httpx.HTTPError as e:
             debug.append({"step": "transport_error", "kind": type(e).__name__, "msg": str(e)})
             logger.warning(f"order/place transport_error: {type(e).__name__}: {e}")
@@ -1073,9 +1084,10 @@ async def cancel_order(req: CancelRequest):
     async with httpx.AsyncClient(timeout=15) as c:
         try:
             r = await c.post(f"{sess['base_url']}/quick/order/cancel",
-                headers={"Auth": sess["session_token"], "Sid": sess["session_sid"],
+                headers={"accept": "application/json",
+                         "Auth": sess["session_token"], "Sid": sess["session_sid"],
                          "neo-fin-key": NEO_FIN_KEY, "Content-Type": "application/x-www-form-urlencoded"},
-                data={"jData": json.dumps({"am": req.am, "on": req.order_no})})
+                content=f"jData={json.dumps({'am': req.am, 'on': req.order_no})}")
             data, err = safe_json(r)
             if err:
                 return {"success": False, "error": err}
@@ -1134,16 +1146,29 @@ async def test_place(req: TestPlaceRequest):
 
     ce = atm_row["ce"]
     pTrdSymbol = ce["p_trd_symbol"]
+    pSymbol    = ce["p_symbol"]
     lot_size   = ce["lot_size"] or (75 if req.instrument.upper() == "NIFTY" else 35)
     qty        = req.qty_lots * lot_size
 
-    # 2. Place the BUY LIMIT order. Capture *everything* — status, headers,
+    # 2. Fetch the option's real LTP. We use this to set a sane limit price
+    #    far below market (max(0.05, ltp*0.6)) — far enough that the order
+    #    will not fill, near enough that Kotak's circuit-range check accepts
+    #    it. A flat ₹0.05 on a ₹100 option is outside the typical ±20%
+    #    circuit and is itself rejected as out-of-range, which can manifest
+    #    as the same opaque 'unauthorized' response we are trying to test.
+    async with httpx.AsyncClient(timeout=10) as c:
+        opt_ltp, _ = await _ltp_via_script_details(c, sess, pSymbol, "nse_fo")
+    safe_limit = req.price
+    if opt_ltp and opt_ltp > 0:
+        safe_limit = max(0.05, round(opt_ltp * 0.6, 2))
+
+    # 3. Place the BUY LIMIT order. Capture *everything* — status, headers,
     #    body — so any IP-whitelist or permissions error is visible.
     place_url = f"{sess['base_url']}/quick/order/rule/ms/place"
     jData = {
         "am": "NO", "dq": "0", "es": "nse_fo", "mp": "0",
         "pc": "MIS", "pf": "N",
-        "pr": f"{req.price:.2f}",
+        "pr": f"{safe_limit:.2f}",
         "pt": "L",                  # LIMIT
         "qt": str(qty),
         "rt": "DAY", "tp": "0",
@@ -1153,19 +1178,27 @@ async def test_place(req: TestPlaceRequest):
     place_diag: dict = {
         "url":        place_url,
         "trading_symbol": pTrdSymbol,
+        "p_symbol":   pSymbol,
         "qty":        qty,
-        "price":      req.price,
+        "option_ltp": opt_ltp,
+        "limit_price": safe_limit,
         "atm_strike": chain_meta["atm"],
         "spot":       spot,
         "expiry":     chain_meta.get("expiry"),
     }
+    # Raw-string body — must match user's working Python reference exactly.
+    # See /orders/place for the full explanation; URL-encoded form data is
+    # what Kotak silently rejects with 401 stCode 100008.
+    body = f"jData={json.dumps(jData)}"
+    place_diag["body_size"] = len(body)
     async with httpx.AsyncClient(timeout=20) as c:
         try:
             r = await c.post(place_url,
-                headers={"Auth": sess["session_token"], "Sid": sess["session_sid"],
+                headers={"accept": "application/json",
+                         "Auth": sess["session_token"], "Sid": sess["session_sid"],
                          "neo-fin-key": NEO_FIN_KEY,
                          "Content-Type": "application/x-www-form-urlencoded"},
-                data={"jData": json.dumps(jData)})
+                content=body)
         except httpx.HTTPError as e:
             place_diag["transport_error"] = f"{type(e).__name__}: {e}"
             return {"success": False, "stage": "place_http", **place_diag}
@@ -1188,10 +1221,11 @@ async def test_place(req: TestPlaceRequest):
         async with httpx.AsyncClient(timeout=15) as c:
             try:
                 cr = await c.post(f"{sess['base_url']}/quick/order/cancel",
-                    headers={"Auth": sess["session_token"], "Sid": sess["session_sid"],
+                    headers={"accept": "application/json",
+                             "Auth": sess["session_token"], "Sid": sess["session_sid"],
                              "neo-fin-key": NEO_FIN_KEY,
                              "Content-Type": "application/x-www-form-urlencoded"},
-                    data={"jData": json.dumps({"am": "NO", "on": str(order_no)})})
+                    content=f"jData={json.dumps({'am': 'NO', 'on': str(order_no)})}")
                 cb, cerr = safe_json(cr)
                 cancel_diag = {
                     "http_status": cr.status_code,
