@@ -567,6 +567,22 @@ async function api(path,body={},method='POST'){
     log('⚠ Rate limit hit: '+( err.detail||'Too many requests. Wait 1 sec.'),'warn');
     throw new Error('RATE_LIMITED');
   }
+  // 401 from any session-bound endpoint means the backend lost our sid
+  // (and rehydrate has already failed on page load, otherwise we wouldn't
+  // be here). Drop the persisted blob so the next refresh shows the
+  // login form instead of trying to rehydrate again.
+  if(r.status===401 && path !== '/auth/check' && path !== '/auth/rehydrate'){
+    try{ localStorage.removeItem('nexus_session'); }catch(_){}
+    if(G.sid){
+      G.sid = null;
+      log('🔒 Session expired — please log in again.','warn');
+      // Soft-revert the UI to the login form without clobbering other state.
+      try{
+        document.getElementById('aDone').style.display='none';
+        document.getElementById('aS1').style.display='block';
+      }catch(_){}
+    }
+  }
   if(!r.ok) throw new Error('HTTP '+r.status);
   return r.json();
 }
@@ -630,25 +646,49 @@ async function doS2(){
   try{
     const res=await api('/auth/validate',{access_token:window._at,view_token:window._vt,view_sid:window._vs,mpin:mp});
     if(res.success){
-      G.sid=res.session_id;
-      document.getElementById('aS2').style.display='none';
-      document.getElementById('aDone').style.display='block';
-      document.getElementById('sessLbl').textContent='Session: '+res.session_id;
-      document.getElementById('authBadge').textContent='LIVE';
-      document.getElementById('authBadge').className='badge bg';
-      document.getElementById('aDot').className='dot on';
-      document.getElementById('aLbl').textContent='LIVE';
-      log('✓ Authenticated! Session: '+res.session_id,'success');
-      fetchWallet(); fetchPos();
-      // Switch from simulated to REAL live data
-      clearInterval(G.liveDataInterval);
-      startLiveFeed();
+      // Persist the full session blob to localStorage so a tab refresh —
+      // and even a Railway redeploy — does NOT force a re-login. See
+      // restoreSession() at the bottom of this file. Tokens are stored
+      // client-side; acceptable for a single-user personal bot.
+      try{
+        localStorage.setItem('nexus_session', JSON.stringify({
+          session_id:   res.session_id,
+          session_blob: res.session_blob,
+          saved_at:     Date.now(),
+          ttl_hours:    res.ttl_hours || 20
+        }));
+      }catch(_){ /* localStorage may be disabled in private mode */ }
+      activateSession(res.session_id, /*restored=*/false);
     }else{log('MPIN failed: '+(res.message||'?'),'error');btn.disabled=false;btn.textContent='✓ STEP 2: VALIDATE MPIN';}
   }catch(e){log('Step 2 error: '+e.message,'error');btn.disabled=false;btn.textContent='✓ STEP 2: VALIDATE MPIN';}
 }
 
+// Switch the UI from the login form to the authenticated state. Used both
+// for fresh logins (after MPIN validate) and for restored sessions on
+// page load. Keeping it in one place ensures the two paths can never
+// diverge.
+function activateSession(sid, restored){
+  G.sid = sid;
+  document.getElementById('aS1').style.display='none';
+  document.getElementById('aS2').style.display='none';
+  document.getElementById('aDone').style.display='block';
+  document.getElementById('sessLbl').textContent='Session: '+sid;
+  document.getElementById('authBadge').textContent='LIVE';
+  document.getElementById('authBadge').className='badge bg';
+  document.getElementById('aDot').className='dot on';
+  document.getElementById('aLbl').textContent='LIVE';
+  log((restored?'↻ Session restored':'✓ Authenticated')+': '+sid,'success');
+  fetchWallet(); fetchPos();
+  clearInterval(G.liveDataInterval);
+  startLiveFeed();
+}
+
 function doLogout(){
   G.sid=null;
+  // Drop the persisted blob so refresh does not re-authenticate behind
+  // the user's back. (For a tab refresh that should stay logged in,
+  // never call doLogout — let restoreSession run on the next load.)
+  try{ localStorage.removeItem('nexus_session'); }catch(_){}
   // Order-auth was tied to this Kotak session — invalidate on logout so
   // the user must re-run TEST ORDER after re-authenticating.
   G.orderAuthVerified=false;
@@ -1319,11 +1359,64 @@ async function squareOff(){
   }
 }
 
+// ── SESSION RESTORE ────────────────────────────────────────────────────────
+// On page load: if a saved session exists in localStorage, try to bring
+// it back to life so the user does NOT have to re-do TOTP+MPIN on every
+// refresh / redeploy.
+//
+// Recovery ladder, cheapest to most expensive:
+//   1. /auth/check       — does the backend already remember this sid?
+//                          (Survives a tab refresh on a hot backend.)
+//   2. /auth/rehydrate   — reseed the in-memory session from the stored
+//                          blob. (Survives a Railway redeploy that wiped
+//                          the in-memory dict + the on-disk sessions.json.)
+//   3. expired/corrupt   — drop the stored blob and show the login form.
+async function restoreSession(){
+  let saved;
+  try{ saved = JSON.parse(localStorage.getItem('nexus_session') || 'null'); }
+  catch(_){ saved = null; }
+  if(!saved || !saved.session_id || !saved.session_blob){ return; }
+
+  // Local TTL gate — don't even ask the server if the saved copy is older
+  // than its declared TTL.
+  const ttlMs = (saved.ttl_hours || 20) * 3600 * 1000;
+  if(Date.now() - (saved.saved_at||0) > ttlMs){
+    log('Saved session expired locally; please log in again.','warn');
+    try{ localStorage.removeItem('nexus_session'); }catch(_){}
+    return;
+  }
+
+  // 1. Quick existence check.
+  try{
+    const chk = await api('/auth/check', {session_id: saved.session_id});
+    if(chk.alive){
+      activateSession(saved.session_id, /*restored=*/true);
+      return;
+    }
+    // 2. Rehydrate — backend forgot us, reseed from the stored blob.
+    log('Backend lost session (likely redeploy) — rehydrating…','info');
+    const rh = await api('/auth/rehydrate', {
+      session_id:   saved.session_id,
+      session_blob: saved.session_blob
+    });
+    if(rh.alive){
+      activateSession(saved.session_id, /*restored=*/true);
+      return;
+    }
+    log('Rehydrate refused: '+(rh.reason||'?')+' — please log in again.','warn');
+    try{ localStorage.removeItem('nexus_session'); }catch(_){}
+  }catch(e){
+    log('Session restore error: '+e.message+' — please log in again.','warn');
+    try{ localStorage.removeItem('nexus_session'); }catch(_){}
+  }
+}
+
 // ── INIT ──────────────────────────────────────────────────────────────────
 buildChain(); chkServer();
 log('NEXUS Bot v3 ready — Real Kotak API connected.','info');
 log('Tap WALLET → authenticate → real NIFTY price feeds automatically.','info');
 log('Position monitor: REAL Kotak LTP polling every '+ (typeof MON_POLL_MS!=='undefined'?MON_POLL_MS:3000) +' ms. Exits place a real SELL @ MKT.','info');
+restoreSession();   // try to skip the login screen entirely
 </script>
 </body>
 </html>
