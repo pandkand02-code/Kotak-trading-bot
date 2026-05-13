@@ -7,7 +7,24 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>NEXUS · Options Bot</title>
 <style>
-:root{--bg:#060d18;--panel:#0a1628;--border:#112240;--accent:#00c8ff;--green:#00e676;--red:#ff3d6e;--gold:#ffd740;--dim:#2a4a6b;--text:#7eb8d4;--bright:#b8d8ea}
+/* High-contrast palette. The previous values had body text at #b8d8ea on
+   #060d18 — contrast ratio ~5.3:1 and felt washed-out at small sizes. The
+   new tones lift --bright to near-white and bump --text + --dim so labels
+   and helper copy are actually legible without changing the dark theme.
+   Inspiration: TradingView and Zerodha Kite "dark" — bright numbers, deep
+   panel backgrounds, accent only on selection. */
+:root{
+  --bg:     #050b16;   /* page background */
+  --panel:  #0d1a2e;   /* card / panel surface, slightly lifted */
+  --border: #1c3253;   /* visible card border */
+  --accent: #38bdf8;   /* cyan accent (selection, ATM, focus) */
+  --green:  #22d18b;
+  --red:    #ff516b;
+  --gold:   #ffd24a;
+  --dim:    #5a7895;   /* readable secondary copy (was #2a4a6b — too dark) */
+  --text:   #b9d2ec;   /* primary body text on cards */
+  --bright: #f0f6ff;   /* numbers, headings — near-white */
+}
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 body{background:var(--bg);color:var(--bright);font-family:'Courier New',monospace;max-width:480px;margin:0 auto;min-height:100vh;overflow-x:hidden}
 ::-webkit-scrollbar{width:3px}::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
@@ -75,8 +92,9 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
 .bull{color:var(--green)}.bear{color:var(--red)}.neut{color:var(--dim)}
 
 /* CHAIN */
-.ch-hdr{display:grid;grid-template-columns:1fr 55px 55px 1fr;padding:5px 8px;background:var(--bg);font-size:9px;color:var(--dim);letter-spacing:1px;border-bottom:1px solid var(--border)}
-.ch-row{display:grid;grid-template-columns:1fr 55px 55px 1fr;padding:9px 8px;border-bottom:1px solid #11224022;cursor:pointer;align-items:center}
+.ch-hdr{display:grid;grid-template-columns:1fr 90px 1fr;padding:7px 10px;background:var(--bg);font-size:10px;color:var(--dim);letter-spacing:1.5px;font-weight:700;border-bottom:1px solid var(--border)}
+.ch-row{display:grid;grid-template-columns:1fr 90px 1fr;padding:11px 10px;border-bottom:1px solid var(--border);cursor:pointer;align-items:center;transition:background .1s}
+.ch-row:hover{background:#38bdf80a}
 .ch-row:active{background:#00c8ff06}
 .ch-row.atm{border-left:2px solid #00c8ff44;background:#00c8ff03}
 .ch-row.sel{background:#00c8ff12;border-left:2px solid #00c8ff88}
@@ -114,8 +132,8 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
 
 /* LOG */
 .log-box{max-height:65vh;overflow-y:auto;padding:10px 12px}
-.ll{padding:3px 0;border-bottom:1px solid #11224022;display:flex;gap:8px;font-size:11px}
-.lt{color:var(--dim);white-space:nowrap;font-size:10px}
+.ll{padding:4px 0;border-bottom:1px solid #1c325322;display:flex;gap:10px;font-size:12px;color:var(--bright);line-height:1.45}
+.lt{color:var(--dim);white-space:nowrap;font-size:11px;font-weight:600}
 
 /* FOOTER */
 .ftr{position:fixed;bottom:0;left:0;right:0;max-width:480px;margin:0 auto;background:var(--panel);border-top:1px solid var(--border);padding:6px 14px;display:flex;justify-content:space-between;font-size:10px;color:var(--dim)}
@@ -246,8 +264,7 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
       </div>
       <div class="ch-hdr">
         <span style="color:var(--green)">CE LTP</span>
-        <span style="text-align:center;color:var(--green)">CE IV</span>
-        <span style="text-align:center;color:var(--red)">PE IV</span>
+        <span style="text-align:center;color:var(--bright)">STRIKE</span>
         <span style="text-align:right;color:var(--red)">PE LTP</span>
       </div>
       <div id="chainBody"></div>
@@ -389,7 +406,7 @@ function gt(n){
 
 // ── LOG ───────────────────────────────────────────────────────────────────
 function log(msg,type='info'){
-  const C={info:'var(--text)',success:'var(--green)',warn:'var(--gold)',error:'var(--red)',trade:'var(--accent)'};
+  const C={info:'var(--bright)',success:'var(--green)',warn:'var(--gold)',error:'var(--red)',trade:'var(--accent)'};
   const box=document.getElementById('logBox');
   const t=new Date().toLocaleTimeString('en-IN',{hour12:false});
   if(G.logN===0) box.innerHTML='';
@@ -770,23 +787,99 @@ function marketStatus(){
   return {open: true, reason: 'NSE live session'};
 }
 
-function buildChain(){
-  const inst=G.inst,sp=G.spot[inst],step=inst==='BANKNIFTY'?100:50;
-  const atm=Math.round(sp/step)*step,T=dte(),r=.065;
-  G.chain=Array.from({length:11},(_,i)=>{
-    const k=atm+(i-5)*step,m=(k-atm)/atm;
-    const ci=.15+Math.abs(m)*1.2+Math.random()*.02,pi=.16+Math.abs(m)*1.3+Math.random()*.02;
-    return{strike:k,atm:k===atm,ce:{ltp:bs(sp,k,T,ci,r,'CE').toFixed(2),iv:(ci*100).toFixed(1),oi:Math.max(1000,Math.floor((800000-Math.abs(m)*6e6)+Math.random()*50000))},pe:{ltp:bs(sp,k,T,pi,r,'PE').toFixed(2),iv:(pi*100).toFixed(1),oi:Math.max(1000,Math.floor((750000-Math.abs(m)*5.5e6)+Math.random()*50000))}};
-  });
-  document.getElementById('atmLbl').textContent=atm;
-  document.getElementById('cInstLbl').textContent=inst;
-  document.getElementById('chainBody').innerHTML=G.chain.map((row,i)=>`
-    <div class="ch-row${row.atm?' atm':''}${G.selRow?.strike===row.strike?' sel':''}" onclick="selRow(${i})">
-      <div><div class="ce" style="font-size:13px;font-weight:${row.atm?700:400}">₹${row.ce.ltp}</div><div class="oism">OI:${(row.ce.oi/1000).toFixed(0)}K</div></div>
-      <div style="text-align:center"><div class="ce" style="font-size:10px">${row.ce.iv}%</div><div style="font-size:11px;${row.atm?'color:var(--accent);font-weight:700':'color:var(--bright)'}">${row.strike}</div></div>
-      <div style="text-align:center"><div class="pe" style="font-size:10px">${row.pe.iv}%</div><div class="oism">${row.atm?'ATM':''}</div></div>
-      <div style="text-align:right"><div class="pe" style="font-size:13px;font-weight:${row.atm?700:400}">₹${row.pe.ltp}</div><div class="oism">OI:${(row.pe.oi/1000).toFixed(0)}K</div></div>
-    </div>`).join('');
+// Real option chain. Pulls strikes + per-leg LTP + the real Kotak
+// p_trd_symbol / p_symbol from /chain/atm and renders them. Cached for
+// G.chainTtlMs because /chain/atm makes ~22 Kotak calls per build (one
+// LTP per leg) and we do not want that on every 5 s tick.
+//
+// Falls back to the local Black-Scholes synthesiser only when there is
+// no session (e.g. between page load and login) so the user sees a
+// non-empty chain immediately. Once logged in, every render is real.
+G.lastChainFetch = 0;
+G.chainTtlMs     = 30000;
+G.chainBusy      = false;
+G.chainExpiry    = '';
+
+function _renderChain(){
+  // Pull strikes from G.chain (already sorted by strike asc). selRow keeps
+  // its position by strike-key match.
+  const atmLbl = document.getElementById('atmLbl');
+  const exLbl  = document.getElementById('cInstLbl');
+  const body   = document.getElementById('chainBody');
+  if(!G.chain || !G.chain.length){
+    body.innerHTML = '<div style="text-align:center;color:var(--dim);padding:18px;font-size:11px">No chain yet — waiting for Kotak…</div>';
+    return;
+  }
+  atmLbl.textContent = G.chain.find(r=>r.atm)?.strike ?? Math.round(G.spot[G.inst]||0);
+  exLbl.textContent  = G.inst + (G.chainExpiry ? ' · '+G.chainExpiry : '');
+  body.innerHTML = G.chain.map((row,i)=>{
+    const sel = G.selRow?.strike === row.strike;
+    const ceLtp = (row.ce?.ltp ?? 0).toFixed(2);
+    const peLtp = (row.pe?.ltp ?? 0).toFixed(2);
+    const src   = row._sim ? '<div class="oism" style="color:var(--gold)">SIM</div>' : '';
+    return `
+    <div class="ch-row${row.atm?' atm':''}${sel?' sel':''}" onclick="selRow(${i})">
+      <div>
+        <div class="ce" style="font-size:15px;font-weight:${row.atm?700:600}">₹${ceLtp}</div>
+        ${src}
+      </div>
+      <div style="text-align:center">
+        <div style="font-size:14px;color:${row.atm?'var(--accent)':'var(--bright)'};font-weight:${row.atm?800:600}">${row.strike}</div>
+        <div class="oism">${row.atm?'ATM':''}</div>
+      </div>
+      <div style="text-align:right">
+        <div class="pe" style="font-size:15px;font-weight:${row.atm?700:600}">₹${peLtp}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function buildChain(){
+  // No session yet → local Black-Scholes synth so the UI is non-blank.
+  if(!G.sid){
+    const inst=G.inst,sp=G.spot[inst],step=inst==='BANKNIFTY'?100:50;
+    const atm=Math.round(sp/step)*step,T=dte(),r=.065;
+    G.chain=Array.from({length:11},(_,i)=>{
+      const k=atm+(i-5)*step,m=(k-atm)/atm;
+      const ci=.15+Math.abs(m)*1.2,pi=.16+Math.abs(m)*1.3;
+      return{strike:k,atm:k===atm,_sim:true,
+        ce:{ltp:parseFloat(bs(sp,k,T,ci,r,'CE').toFixed(2))},
+        pe:{ltp:parseFloat(bs(sp,k,T,pi,r,'PE').toFixed(2))}};
+    });
+    G.chainExpiry = '';
+    _renderChain();
+    return;
+  }
+
+  // Throttle: serve cached chain if it was refreshed less than chainTtlMs ago.
+  const now = Date.now();
+  if(G.chain.length && (now - G.lastChainFetch) < G.chainTtlMs){
+    _renderChain();
+    return;
+  }
+  if(G.chainBusy){ _renderChain(); return; }
+  G.chainBusy = true;
+  try{
+    const r = await api('/chain/atm', {session_id:G.sid, instrument:G.inst, spot:G.spot[G.inst]||0, n_strikes:5});
+    if(r && r.success && Array.isArray(r.strikes) && r.strikes.length){
+      G.chain = r.strikes.map(s => ({
+        strike: s.strike,
+        atm:    s.atm,
+        ce:     s.ce ? {ltp: +(s.ce.ltp||0), p_symbol: s.ce.p_symbol, p_trd_symbol: s.ce.p_trd_symbol, lot_size: s.ce.lot_size} : null,
+        pe:     s.pe ? {ltp: +(s.pe.ltp||0), p_symbol: s.pe.p_symbol, p_trd_symbol: s.pe.p_trd_symbol, lot_size: s.pe.lot_size} : null,
+      }));
+      G.chainExpiry    = r.expiry || '';
+      G.lastChainFetch = now;
+      log('✓ REAL chain — '+G.chain.length+' strikes around ATM '+r.atm+(r.expiry?' exp='+r.expiry:''),'success');
+    } else if(r && !r.success){
+      log('Chain fetch returned no data: '+(r.error||'?')+' — keeping prior chain.','warn');
+    }
+  }catch(e){
+    log('Chain fetch error: '+e.message+' — keeping prior chain.','warn');
+  }finally{
+    G.chainBusy = false;
+    _renderChain();
+  }
 }
 
 function selRow(i){
