@@ -322,7 +322,7 @@ async def validate(req: ValidateRequest):
                 return {"success": False, "message": f"Kotak validate: {err}"}
             if d.get("data", {}).get("token"):
                 sid = f"sess_{req.view_sid[-8:]}"
-                sessions[sid] = {
+                blob = {
                     "access_token":  req.access_token,   # required for /script-details/* REST quotes
                     "session_token": d["data"]["token"],
                     "session_sid":   d["data"]["sid"],
@@ -331,11 +331,86 @@ async def validate(req: ValidateRequest):
                     "hsServerId":    d["data"].get("hsServerId", ""),
                     "created_at":    datetime.now().isoformat()
                 }
+                sessions[sid] = blob
                 _sessions_save()
-                return {"success": True, "session_id": sid}
+                # Return the full blob so the browser can persist it to
+                # localStorage. This lets the UI recover across:
+                #   (a) a tab refresh (no backend round-trip required), and
+                #   (b) a Railway redeploy that wipes sessions.json — the
+                #       client posts the blob back to /auth/rehydrate to
+                #       reseed the in-memory entry.
+                # SECURITY NOTE: storing tokens in localStorage exposes them
+                # to XSS. For a single-user personal bot served from your
+                # own Railway app this is an acceptable trade-off; for any
+                # multi-user deployment, switch to httpOnly cookies.
+                return {
+                    "success":      True,
+                    "session_id":   sid,
+                    "session_blob": blob,
+                    "ttl_hours":    SESSION_TTL_HOURS,
+                }
             return {"success": False, "message": d.get("message", "MPIN failed")}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── SESSION PERSISTENCE: check + rehydrate ───────────────────────────────────
+class CheckRequest(BaseModel):
+    session_id: str
+
+
+@app.post("/auth/check")
+async def auth_check(req: CheckRequest):
+    """Fast 'is this session still in memory?' probe. The frontend calls this
+    on page load before any other API. Does NOT touch Kotak — the live-API
+    health is implicitly tested by the next real call (which will return 401
+    if the Kotak-side session has expired)."""
+    sess = sessions.get(req.session_id)
+    if not sess:
+        return {"alive": False, "reason": "not_in_memory"}
+    try:
+        ts = datetime.fromisoformat(sess.get("created_at", "")).timestamp()
+    except ValueError:
+        ts = 0
+    age_h = (datetime.now().timestamp() - ts) / 3600 if ts else 999
+    return {
+        "alive":       age_h < SESSION_TTL_HOURS,
+        "age_hours":   round(age_h, 2),
+        "ttl_hours":   SESSION_TTL_HOURS,
+    }
+
+
+class RehydrateRequest(BaseModel):
+    session_id:    str
+    session_blob:  dict
+
+
+@app.post("/auth/rehydrate")
+async def auth_rehydrate(req: RehydrateRequest):
+    """Re-seed the in-memory session entry from a client-supplied blob.
+
+    The frontend calls this if /auth/check says 'not_in_memory' (i.e. the
+    backend was redeployed and lost its in-memory + on-disk sessions). The
+    client's localStorage holds the full blob from the last /auth/validate,
+    so we can restore everything without forcing the user back to login.
+    """
+    blob = req.session_blob or {}
+    required = {"access_token", "session_token", "session_sid", "base_url"}
+    missing = required - set(blob.keys())
+    if missing:
+        return {"alive": False, "reason": f"blob missing fields: {sorted(missing)}"}
+    try:
+        ts = datetime.fromisoformat(blob.get("created_at", "")).timestamp()
+    except ValueError:
+        return {"alive": False, "reason": "invalid created_at"}
+    age_h = (datetime.now().timestamp() - ts) / 3600
+    if age_h >= SESSION_TTL_HOURS:
+        return {"alive": False, "reason": f"expired (age {age_h:.1f}h >= ttl {SESSION_TTL_HOURS}h)"}
+    sessions[req.session_id] = blob
+    _sessions_save()
+    logger.info(f"session rehydrated: {req.session_id} (age {age_h:.1f}h)")
+    return {"alive": True, "session_id": req.session_id, "age_hours": round(age_h, 2)}
+
 
 # ── WALLET / LIMITS ───────────────────────────────────────────────────────────
 # Kotak's /quick/user/limits ships the same numbers under wildly different
