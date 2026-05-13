@@ -796,9 +796,36 @@ function marketStatus(){
 // no session (e.g. between page load and login) so the user sees a
 // non-empty chain immediately. Once logged in, every render is real.
 G.lastChainFetch = 0;
-G.chainTtlMs     = 30000;
+G.chainTtlMs     = 10000;   // 10 s — refreshes ~6×/min, well under Kotak's
+                            // 600/min general cap (each /chain/atm call
+                            // issues ~22 leg-LTP fetches = ~132/min worst
+                            // case; we still have ~78 % headroom for the
+                            // rest of the bot).
 G.chainBusy      = false;
 G.chainExpiry    = '';
+
+// Kotak's scrip master ships option expiry as an integer that decodes to
+// "seconds since 1980-01-01 00:00 IST" — value 1463668200 maps to mid-May
+// 2026, which lines up with the user's 2026 trading day. We try unix-seconds
+// first (covers the cases where Kotak ships a normal epoch), and fall back
+// to the 1980-IST offset if year is implausible. If we still cannot make
+// sense of it, the raw value is shown so debugging is easy.
+function fmtExpiry(v){
+  if(v == null || v === '') return '';
+  const n = parseInt(v, 10);
+  if(!Number.isFinite(n)) return String(v);
+  const candidates = [
+    new Date(n * 1000),                       // plain unix seconds
+    new Date((n + 315513000) * 1000),          // +1980-01-01 IST offset (Kotak)
+  ];
+  for(const d of candidates){
+    const y = d.getFullYear();
+    if(y >= 2024 && y <= 2031){
+      return d.toLocaleDateString('en-IN', {day:'2-digit', month:'short', year:'numeric'}).toUpperCase();
+    }
+  }
+  return String(v);
+}
 
 function _renderChain(){
   // Pull strikes from G.chain (already sorted by strike asc). selRow keeps
@@ -811,16 +838,19 @@ function _renderChain(){
     return;
   }
   atmLbl.textContent = G.chain.find(r=>r.atm)?.strike ?? Math.round(G.spot[G.inst]||0);
-  exLbl.textContent  = G.inst + (G.chainExpiry ? ' · '+G.chainExpiry : '');
+  exLbl.textContent  = G.inst + (G.chainExpiry ? ' · '+fmtExpiry(G.chainExpiry) : '');
+  // Render '—' for legs with ltp<=0 instead of '₹0.00'. A zero LTP is
+  // almost always a transient leg-fetch failure (one of the 22 per-leg
+  // /script-details calls timed out); a misleading ₹0.00 row would make
+  // the user think the strike is actually free.
+  const fmtLtp = (leg) => (leg && leg.ltp > 0) ? '₹'+leg.ltp.toFixed(2) : '<span style="color:var(--dim)">—</span>';
   body.innerHTML = G.chain.map((row,i)=>{
     const sel = G.selRow?.strike === row.strike;
-    const ceLtp = (row.ce?.ltp ?? 0).toFixed(2);
-    const peLtp = (row.pe?.ltp ?? 0).toFixed(2);
-    const src   = row._sim ? '<div class="oism" style="color:var(--gold)">SIM</div>' : '';
+    const src = row._sim ? '<div class="oism" style="color:var(--gold)">SIM</div>' : '';
     return `
     <div class="ch-row${row.atm?' atm':''}${sel?' sel':''}" onclick="selRow(${i})">
       <div>
-        <div class="ce" style="font-size:15px;font-weight:${row.atm?700:600}">₹${ceLtp}</div>
+        <div class="ce" style="font-size:15px;font-weight:${row.atm?700:600}">${fmtLtp(row.ce)}</div>
         ${src}
       </div>
       <div style="text-align:center">
@@ -828,7 +858,7 @@ function _renderChain(){
         <div class="oism">${row.atm?'ATM':''}</div>
       </div>
       <div style="text-align:right">
-        <div class="pe" style="font-size:15px;font-weight:${row.atm?700:600}">₹${peLtp}</div>
+        <div class="pe" style="font-size:15px;font-weight:${row.atm?700:600}">${fmtLtp(row.pe)}</div>
       </div>
     </div>`;
   }).join('');
