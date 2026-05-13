@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 import os
-import httpx, json, asyncio, time
+import httpx, json, asyncio, time, re
 from datetime import datetime
 from collections import deque
 from pydantic import BaseModel
@@ -692,6 +692,90 @@ async def resolve_strike(req: ResolveStrikeRequest):
     }
 
 
+# ── NEWS SENTIMENT (server-side; browser CORS blocks Indian news sites) ───
+_news_cache: dict[str, tuple[float, dict]] = {}
+NEWS_TTL = 300  # 5 min — cheap shared cache; clients can call every cycle
+
+_BULL_WORDS = {"surge","rally","gain","gains","upgrade","beat","beats","record",
+               "high","strong","rises","jumps","jump","soars","soar","outperform",
+               "buy","positive","bullish","accelerate","recover","recovery"}
+_BEAR_WORDS = {"plunge","fall","falls","drop","drops","downgrade","miss","misses",
+               "weak","cuts","tumbles","tumble","slumps","slump","loss","losses",
+               "sell","negative","bearish","decline","sink","sinks","crash"}
+
+
+class NewsSentimentRequest(BaseModel):
+    instrument: str = "NIFTY"
+
+
+@app.post("/news/sentiment")
+async def news_sentiment(req: NewsSentimentRequest):
+    """Lightweight news-sentiment input for the AI signal prompt.
+
+    Fetches Google News RSS for the instrument, scores headlines with a
+    bull/bear lexicon, returns sentiment_score in [-1, +1] plus the
+    headlines. Cached for 5 minutes server-side so per-cycle calls are
+    free after the first one.
+    """
+    key = req.instrument.upper()
+    now = time.monotonic()
+    hit = _news_cache.get(key)
+    if hit and hit[0] > now:
+        return {**hit[1], "cached": True}
+
+    query_g = f"{key}+nifty+nse" if key != "NIFTY" else "NIFTY+nse+india"
+    query_b = f"{key} nifty nse india"
+    sources = [
+        ("google", f"https://news.google.com/rss/search?q={query_g}&hl=en-IN&gl=IN&ceid=IN:en"),
+        ("bing",   f"https://www.bing.com/news/search?q={query_b.replace(' ', '+')}&format=rss"),
+    ]
+    headlines: list[str] = []
+    errs: list[str] = []
+    # Browser-like UA — RSS endpoints often 403 plain-bot user agents.
+    ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+    async with httpx.AsyncClient(timeout=8, headers={"User-Agent": ua,
+                                                      "Accept": "application/rss+xml, application/xml, text/xml, */*"}) as c:
+        for src_name, url in sources:
+            try:
+                r = await c.get(url, follow_redirects=True)
+                if r.status_code == 200 and r.text:
+                    titles = re.findall(r"<title[^>]*>(.*?)</title>", r.text, re.DOTALL)
+                    cleaned = [re.sub(r"<!\[CDATA\[(.*?)\]\]>", r"\1", t).strip() for t in titles[1:11]]
+                    cleaned = [t for t in cleaned if t and len(t) > 5]
+                    if cleaned:
+                        headlines.extend(cleaned)
+                        break   # first source that returns usable headlines wins
+                else:
+                    errs.append(f"{src_name}:HTTP {r.status_code}")
+            except httpx.HTTPError as e:
+                errs.append(f"{src_name}:{type(e).__name__}")
+    err = "; ".join(errs) if not headlines and errs else None
+
+    score = 0.0
+    matched = 0
+    for h in headlines:
+        words = set(w.lower() for w in re.findall(r"[A-Za-z]+", h))
+        b = len(words & _BULL_WORDS)
+        s = len(words & _BEAR_WORDS)
+        if b or s:
+            matched += 1
+            score += (b - s) / max(b + s, 1)
+    sentiment = round(score / matched, 3) if matched else 0.0
+
+    payload = {
+        "sentiment_score": sentiment,    # -1.0 .. +1.0
+        "headlines":       headlines[:8],
+        "count":           len(headlines),
+        "matched":         matched,
+        "error":           err,
+        "fetched_at":      int(time.time()),
+        "cached":          False,
+    }
+    _news_cache[key] = (now + NEWS_TTL, payload)
+    return payload
+
+
 @app.post("/quotes/stream_status")
 async def stream_status(req: SessionRequest):
     """Inspect the WebSocket streamer for a session — connection state,
@@ -912,19 +996,76 @@ async def place_order(req: OrderRequest):
              "mp": req.market_protection, "pc": req.product, "pf": req.pf,
              "pr": req.price, "pt": req.order_type, "qt": req.quantity,
              "rt": req.validity, "tp": req.trigger_price, "ts": req.trading_symbol, "tt": req.transaction_type}
+
+    # ── Step-by-step debug trace ────────────────────────────────────────────
+    # When orders fail at Kotak (HTTP 401 stCode 100008 is the case in play)
+    # the frontend was previously left with a generic "?". This trace makes
+    # every phase visible: payload sent, HTTP status received, body snippet,
+    # parse outcome, final fields. Always returned on non-Ok responses;
+    # always written to the server log at INFO/WARNING.
+    debug = []
+    url = f"{sess['base_url']}/quick/order/rule/ms/place"
+    debug.append({
+        "step": "pre",
+        "url":  url,
+        "ts":   req.trading_symbol,
+        "tt":   req.transaction_type,
+        "qt":   req.quantity,
+        "pt":   req.order_type,
+        "pc":   req.product,
+        "es":   req.exchange_segment,
+        "header_keys": ["Auth", "Sid", "neo-fin-key", "Content-Type"],
+        "jdata_keys":  sorted(jData.keys()),
+    })
+    logger.info(f"order/place pre: ts={req.trading_symbol} tt={req.transaction_type} qt={req.quantity} pt={req.order_type}")
+
     async with httpx.AsyncClient(timeout=15) as c:
+        t0 = time.monotonic()
         try:
-            r = await c.post(f"{sess['base_url']}/quick/order/rule/ms/place",
+            r = await c.post(url,
                 headers={"Auth": sess["session_token"], "Sid": sess["session_sid"],
                          "neo-fin-key": NEO_FIN_KEY, "Content-Type": "application/x-www-form-urlencoded"},
                 data={"jData": json.dumps(jData)})
-            result, err = safe_json(r)
-            if err:
-                return {"success": False, "error": err}
+        except httpx.HTTPError as e:
+            debug.append({"step": "transport_error", "kind": type(e).__name__, "msg": str(e)})
+            logger.warning(f"order/place transport_error: {type(e).__name__}: {e}")
+            return {"success": False, "stat": "Not_Ok", "error": f"{type(e).__name__}: {e}", "debug": debug}
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        debug.append({
+            "step":         "http_response",
+            "status_code":  r.status_code,
+            "content_type": r.headers.get("content-type", ""),
+            "body_snippet": (r.text or "")[:500],
+            "elapsed_ms":   elapsed_ms,
+        })
+
+        result, err = safe_json(r)
+        debug.append({
+            "step":          "parsed",
+            "parser_error":  err,
+            "parsed_keys":   sorted(result.keys()) if isinstance(result, dict) else None,
+            "stat":          result.get("stat") if isinstance(result, dict) else None,
+            "nOrdNo":        result.get("nOrdNo") if isinstance(result, dict) else None,
+            "stCode":        result.get("stCode") if isinstance(result, dict) else None,
+            "emsg":          result.get("emsg") if isinstance(result, dict) else None,
+        })
+
+        if err:
+            logger.warning(f"order/place parse_error http={r.status_code} err={err}")
+            return {"success": False, "stat": "Not_Ok", "error": err, "debug": debug}
+
+        if isinstance(result, dict) and result.get("stat") == "Ok":
             logger.info(f"Order placed: {result}")
-            return result
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            return {**result, "debug": debug}
+
+        logger.warning(
+            f"order/place NOT OK http={r.status_code} stCode={result.get('stCode') if isinstance(result, dict) else '?'} "
+            f"emsg={result.get('emsg') if isinstance(result, dict) else '?'}"
+        )
+        # Always include the debug trace when the order didn't come back Ok.
+        if isinstance(result, dict):
+            return {**result, "debug": debug}
+        return {"success": False, "stat": "Not_Ok", "raw": result, "debug": debug}
 
 @app.post("/orders/cancel")
 async def cancel_order(req: CancelRequest):

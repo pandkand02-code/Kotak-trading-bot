@@ -370,7 +370,14 @@ const G = {
   sid:null, spot:{NIFTY:24350,BANKNIFTY:52100,FINNIFTY:23800,MIDCPNIFTY:12400},
   inst:"NIFTY", lots:1, chain:[], selRow:null, sig:null,
   botOn:false, botIv:null, open:[], done:[], pnl:0, logN:0, wallet:null,
-  orderAuthVerified:false
+  orderAuthVerified:false,
+  // Autonomous-trade gates (read by cycle()).
+  lastEntryTs:    0,
+  maxConcurrent:  3,
+  minConfidence:  70,
+  cooldownMs:     5*60*1000,
+  rlHeadroom:     0.90,        // refuse new auto-trade if any limiter > 90%
+  news:           null         // { score:-1..+1, headlines:[], ts }
 };
 const mon = {};
 
@@ -778,18 +785,18 @@ async function placeOrder(side,rowOvr){
   const qty=G.lots*LS[G.inst];
   const tid='T'+Date.now();
 
-  // Resolve the strike to a REAL Kotak contract. Without this we'd send
-  // a malformed trading symbol (e.g. 'NIFTY24500CE' has no expiry) and
-  // we'd compute TP/SL off the BS-simulated price instead of market.
+  // ── STEP 1/5 — resolve strike to real Kotak contract ──
   let resolved = null;
   if(G.sid){
+    log('STEP 1/5 resolve_strike → '+G.inst+' '+row.strike+side+' …','info');
     try{
       resolved = await api('/chain/resolve_strike',{session_id:G.sid, instrument:G.inst, strike:row.strike, side});
       if(!resolved.ok){
-        log('Strike resolution failed: '+(resolved.error||'?')+' — cannot place real trade.','error');
+        log('STEP 1/5 FAIL — resolve_strike: '+(resolved.error||'?'),'error');
         return;
       }
-    }catch(e){log('Strike resolution error: '+e.message,'error'); return;}
+      log('STEP 1/5 OK — ts='+resolved.p_trd_symbol+' p_sym='+resolved.p_symbol+' ltp=₹'+resolved.ltp+' exp='+(resolved.expiry||'?'),'success');
+    }catch(e){log('STEP 1/5 ERR — '+e.message,'error'); return;}
   }
   // Real values from Kotak (paper-mode falls back to chain UI values).
   const ltp        = resolved ? resolved.ltp           : parseFloat(side==='CE'?row.ce.ltp:row.pe.ltp);
@@ -798,18 +805,19 @@ async function placeOrder(side,rowOvr){
   const tp = +(ltp*(1+parseFloat(document.getElementById('tpS').value)/100)).toFixed(2);
   const sl = +(ltp*(1-parseFloat(document.getElementById('slS').value)/100)).toFixed(2);
 
-  // Risk gate: pre-trade check against daily caps + wallet headroom.
+  // ── STEP 2/5 — pre-trade risk check ──
   if(G.sid){
     try{
       const rc=await api('/risk/check',{required_margin: ltp*qty});
       if(!rc.allowed){
-        log('Trade BLOCKED by risk engine: '+rc.reason,'error');
+        log('STEP 2/5 BLOCK — risk engine: '+rc.reason,'error');
         return;
       }
-    }catch(e){log('Risk check error: '+e.message,'warn');}
+      log('STEP 2/5 OK — risk_check passed (need ₹'+(ltp*qty).toFixed(0)+')','info');
+    }catch(e){log('STEP 2/5 WARN — risk check error: '+e.message,'warn');}
   }
 
-  log(`Placing: BUY ${qty}×${realSymbol} @ MKT | Entry ₹${ltp.toFixed(2)} | TP:${tp} SL:${sl}`,'trade');
+  log(`STEP 3/5 sending to Kotak: BUY ${qty}×${realSymbol} @ MKT | Entry ₹${ltp.toFixed(2)} | TP:${tp} SL:${sl}`,'trade');
   // Gates before sending to Kotak. TEST ORDER must have succeeded
   // (G.orderAuthVerified) and the quote stream must be healthy.
   let liveOrdNo = null;
@@ -820,9 +828,10 @@ async function placeOrder(side,rowOvr){
   } else if(G.sid){
     try{
       const res=await api('/orders/place',{session_id:G.sid,trading_symbol:realSymbol,transaction_type:'B',quantity:String(qty),order_type:'MKT',exchange_segment:'nse_fo',product:'NRML'});
+      log('STEP 4/5 Kotak responded — stat='+(res.stat||'?')+' stCode='+(res.stCode||'-')+' ordNo='+(res.nOrdNo||'-'),'info');
       if(res.stat==='Ok'){
         liveOrdNo = res.nOrdNo;
-        log('✓ Order placed! OrdNo: '+res.nOrdNo,'success');
+        log('STEP 5/5 ✓ Order placed! OrdNo: '+res.nOrdNo,'success');
       } else {
         const code = res.stCode || res.errCode || res.code;
         const msg  = res.emsg || res.errMsg || res.message || res.error || 'unknown';
@@ -836,10 +845,16 @@ async function placeOrder(side,rowOvr){
         } else if(/symbol|scrip|instrument/i.test(msg)){
           hint = ' — bad trading symbol. Rebuild chain.';
         }
-        log('Order error '+(code?'['+code+'] ':'')+msg+hint,'error');
+        log('STEP 5/5 ✗ Order error '+(code?'['+code+'] ':'')+msg+hint,'error');
+        // Dump the per-step backend trace so the user can see exactly which
+        // phase failed inside the FastAPI handler (pre / http_response /
+        // parsed / transport_error).
+        if(res.debug){
+          log('Backend trace: '+JSON.stringify(res.debug).substring(0,500),'warn');
+        }
         return; // do NOT create a local trade if Kotak rejected
       }
-    }catch(e){log('Order failed: '+e.message,'error'); return;}
+    }catch(e){log('STEP 5/5 ✗ Order failed: '+e.message,'error'); return;}
   }else log('[NO KOTAK SESSION] Tracked locally.','warn');
 
   const trade={
@@ -1082,6 +1097,8 @@ India VIX: ${md.vix}
 Ticks observed this session: ${md.ticks_observed}
 Time: ${md.time}
 Data source: ${md.data_source}
+News sentiment (-1 bearish .. +1 bullish): ${G.news?.sentiment_score ?? 'n/a'}
+Recent headlines: ${(G.news?.headlines||[]).slice(0,5).join(' | ') || 'n/a'}
 
 Direction rules:
 - If ticks_observed < 6, return WAIT (insufficient session history; need ~30s of ticks).
@@ -1090,6 +1107,7 @@ Direction rules:
 - intraday change between -0.05% and +0.05% with momentum near zero -> WAIT.
 - Mixed signal (change one way, momentum the other) -> WAIT, low confidence (50–60).
 - Confidence 50–90 based on how far the values are past the threshold.
+- News-sentiment tiebreaker: when |intraday change| < 0.1% AND |news sentiment| > 0.3, lean toward sentiment direction (CE if >0, PE if <0) with confidence 55–65. News may NEVER override a clear price-action direction; treat it as a small bias only.
 
 For the per-indicator fields, derive each from the real price action (no
 fabrication — base every label on the numbers above):
@@ -1207,17 +1225,76 @@ async function startBot(){
         }
       }catch(e){}
     }
-    if(G.sig?.confidence>=68&&G.open.length===0&&G.sig.direction!=='WAIT'){
-      const step=G.inst==='BANKNIFTY'?100:50;
-      const atm=Math.round(G.spot[G.inst]/step)*step;
-      const ar=G.chain.find(r=>r.strike===atm);
-      if(ar){log('Auto-trade: '+G.sig.direction+' @ '+atm,'trade');placeOrder(G.sig.direction,ar);}
-    }
+    await dispatchAutoTrade();
   },60000);
+}
+
+// ── AUTONOMOUS DISPATCH ───────────────────────────────────────────────────
+// Gates checked in order. Every refusal logs *why* so the user can audit
+// the bot's behaviour from the LOG tab. All checks are conservative — a
+// failure to evaluate a gate (e.g. /rate_limit/status timeout) leaves the
+// trade un-dispatched, never auto-fires it.
+async function dispatchAutoTrade(){
+  if(!G.botOn || !G.sig) return;
+  const dir = G.sig.direction;
+  const conf = G.sig.confidence;
+  if(dir === 'WAIT'){ return; }
+
+  // 1. Confidence floor.
+  if(conf < G.minConfidence){
+    log('Auto-trade SKIP — confidence '+conf+' < '+G.minConfidence,'info'); return;
+  }
+  // 2. Max concurrent positions.
+  if(G.open.length >= G.maxConcurrent){
+    log('Auto-trade SKIP — '+G.open.length+'/'+G.maxConcurrent+' positions already open','info'); return;
+  }
+  // 3. Per-entry cooldown (only enforced when at least one position is open;
+  //    otherwise the user has likely been flat for a while).
+  const sinceLast = Date.now() - G.lastEntryTs;
+  if(sinceLast < G.cooldownMs && G.open.length > 0){
+    log('Auto-trade SKIP — cooldown '+Math.ceil((G.cooldownMs-sinceLast)/1000)+'s remaining','info'); return;
+  }
+  // 4. Pick the ATM strike row.
+  const step = G.inst==='BANKNIFTY'?100:50;
+  const atm  = Math.round(G.spot[G.inst]/step)*step;
+  const ar   = G.chain.find(r => r.strike === atm);
+  if(!ar){ log('Auto-trade SKIP — no chain row for ATM '+atm,'warn'); return; }
+  // 5. De-dupe: refuse if we already hold this strike+side.
+  const dup = G.open.find(t => t.symbol && t.symbol.indexOf(atm+dir) >= 0);
+  if(dup){ log('Auto-trade SKIP — already long '+dup.symbol,'info'); return; }
+  // 6. Rate-limit headroom. Refuse if either limiter > 90% used.
+  try{
+    const r = await fetch(API+'/rate_limit/status').then(x=>x.json()).catch(()=>null);
+    if(r && r.general_api && r.order_api){
+      const genUsed = r.general_api.used / Math.max(1, r.general_api.limit);
+      const ordUsed = r.order_api.used   / Math.max(1, r.order_api.limit);
+      if(genUsed > G.rlHeadroom || ordUsed > G.rlHeadroom){
+        log('Auto-trade SKIP — rate-limit headroom low (gen '+(genUsed*100).toFixed(0)+'% / ord '+(ordUsed*100).toFixed(0)+'%)','warn');
+        return;
+      }
+    }
+  }catch(e){ /* don't block on observability check */ }
+
+  // All gates passed.
+  G.lastEntryTs = Date.now();
+  log('AUTO-TRADE → '+dir+' @ '+atm+' (conf '+conf+'%, news '+(G.news?.sentiment_score??'n/a')+')','trade');
+  placeOrder(dir, ar);
+}
+
+// ── NEWS FETCH (server-side; cached 5 min) ────────────────────────────────
+async function fetchNews(){
+  try{
+    const r = await api('/news/sentiment', {instrument: G.inst});
+    G.news = r;
+    log('News '+(r.cached?'(cache)':'(fresh)')+' — sentiment '+r.sentiment_score+' across '+r.count+' headlines'+(r.error?(' err:'+r.error):''),'info');
+  }catch(e){
+    log('News fetch error: '+e.message,'warn');
+  }
 }
 
 async function cycle(){
   if(G.sid){await fetchWallet();await fetchPos();}
+  if(G.sid){await fetchNews().catch(()=>{});}
   await analyze();
 }
 
