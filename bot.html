@@ -161,6 +161,11 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
 .step-ok{font-size:12px;color:var(--green);text-align:center;padding:9px;background:#22ab9418;border-radius:8px;margin-bottom:8px;font-weight:500}
 .totp-t{font-size:16px;font-weight:700;min-width:44px;text-align:center}
 </style>
+<!-- Lightweight Charts (Apache-2.0, made by TradingView). Renders OHLC
+     candles from data WE supply — no third-party data entitlement
+     required. We feed it the Kotak tick stream the rest of the bot
+     already uses. -->
+<script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
 
@@ -513,6 +518,7 @@ async function fetchLiveMarketData(){
       if(res.vix && res.vix>0) G.liveVix=res.vix;
       buildChain();
       quickLean();         // sub-cycle direction refresh (no LLM call)
+      pushTickToChart(res.ltp, Date.now());   // feed live tick → chart
       log('✅ REAL: '+G.inst+' ₹'+res.ltp.toFixed(2)+' | Chg:'+(chng>=0?'+':'')+chng.toFixed(2)+'% | VIX:'+(res.vix?res.vix.toFixed(2):'—'),'success');
       _onQuoteOk();
     } else {
@@ -604,6 +610,7 @@ function startLiveFeed(){
       el.textContent=G.inst+' '+s.toFixed(2)+' (SIMULATED)';
       el.style.color='var(--gold)';
       buildChain();
+      pushTickToChart(s, Date.now());
     },3000);
   }
 }
@@ -899,49 +906,105 @@ function _renderChain(){
   }).join('');
 }
 
-// ── TRADINGVIEW CHART (free embed widget, iframe URL) ─────────────────────
-// We restrict the bot to two benchmarks — NIFTY 50 (NSE) and SENSEX (BSE).
-// Iframe embed is used instead of TradingView's script injection because
-// the dynamic-script form falls back to its hardcoded default symbol
-// (AAPL) when its inline JSON config isn't read in the right order — a
-// known quirk of `embed-widget-advanced-chart.js`. The iframe URL puts
-// the symbol in the query string, so it cannot be overridden.
-G.chartTf = 5;     // minutes per candle
-function _tvSymbol(){
-  return G.inst === 'SENSEX' ? 'BSE:SENSEX' : 'NSE:NIFTY';
+// ── SELF-HOSTED LIVE CHART (Lightweight Charts + Kotak ticks) ─────────────
+// TradingView's free embed widget refuses real-time Indian indices with
+// "This symbol is only available on TradingView" — their data
+// entitlements need a paid plan. We side-step that by rendering OHLC
+// candles ourselves using the exact tick stream the bot already trades
+// on. Zero data lag because the chart updates the moment our 5 s tick
+// arrives. No CORS, no iframe gating, no symbol restrictions.
+//
+// API shape used: TradingView's open-source Lightweight Charts (loaded
+// from CDN in <head>). Bar timestamps are unix-seconds, IST.
+G.chartTf       = 1;              // default 1-minute candles so the chart
+                                  // fills within a minute of session start
+G.chartBars     = {};             // {NIFTY:[bar,…], SENSEX:[bar,…]}
+G.tvChart       = null;
+G.tvSeries      = null;
+G.tvLastInst    = null;
+
+function _barFloor(unixSec, tfMin){
+  return Math.floor(unixSec / (tfMin*60)) * (tfMin*60);
 }
+
+function pushTickToChart(price, ts /* ms */, inst){
+  inst = inst || G.inst;
+  const tf  = G.chartTf || 1;
+  const sec = Math.floor((ts || Date.now()) / 1000);
+  const t   = _barFloor(sec, tf);
+  if(!G.chartBars[inst]) G.chartBars[inst] = [];
+  const bars = G.chartBars[inst];
+  const last = bars[bars.length - 1];
+  let bar;
+  if(!last || last.time < t){
+    bar = {time:t, open:price, high:price, low:price, close:price};
+    bars.push(bar);
+    if(bars.length > 240) bars.shift();
+  } else {
+    last.high  = Math.max(last.high, price);
+    last.low   = Math.min(last.low,  price);
+    last.close = price;
+    bar = last;
+  }
+  if(inst === G.inst && G.tvSeries){
+    try { G.tvSeries.update(bar); } catch(_){}
+  }
+}
+
 function mountChart(){
-  const sym = _tvSymbol();
-  const tf  = G.chartTf || 5;
-  document.getElementById('tvSymLbl').textContent = G.inst;
   const host = document.getElementById('tvChart');
   if(!host) return;
-  // Use TradingView's widgetembed iframe. Studies pinned to EMA + RSI.
-  const params = new URLSearchParams({
-    symbol:           sym,
-    interval:         String(tf),
-    theme:            'dark',
-    style:            '1',                  // candlesticks
-    timezone:         'Asia/Kolkata',
-    locale:           'in',
-    hide_side_toolbar: '1',
-    hide_top_toolbar:  '0',
-    hide_legend:       '0',
-    save_image:        '0',
-    studies:           '["STD;EMA","STD;RSI"]',
-    backgroundColor:   '%23000000',
-    gridColor:         '%231c1c1c',
+  document.getElementById('tvSymLbl').textContent = G.inst;
+  // Library still loading? show a tiny notice and retry shortly.
+  if(!window.LightweightCharts){
+    host.innerHTML = '<div style="padding:24px;color:var(--dim);font-size:12px;text-align:center">Loading chart engine…</div>';
+    setTimeout(mountChart, 250);
+    return;
+  }
+  // Tear down any existing chart before remounting (timeframe / inst swap).
+  host.innerHTML = '';
+  G.tvChart = LightweightCharts.createChart(host, {
+    width:  host.clientWidth,
+    height: 300,
+    layout: {background:{type:'solid', color:'#000000'}, textColor:'#9c9c9c', fontFamily:'-apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", sans-serif'},
+    grid:   {vertLines:{color:'#1c1c1c'}, horzLines:{color:'#1c1c1c'}},
+    rightPriceScale: {borderColor:'#1c1c1c'},
+    timeScale:       {borderColor:'#1c1c1c', timeVisible:true, secondsVisible:false},
+    crosshair:       {mode: LightweightCharts.CrosshairMode.Normal},
+    handleScroll:    {mouseWheel:true, pressedMouseMove:true, horzTouchDrag:true},
+    handleScale:     {axisPressedMouseMove:true, mouseWheel:true, pinch:true},
   });
-  host.innerHTML =
-    `<iframe src="https://s.tradingview.com/widgetembed/?${params.toString()}" `+
-    `style="width:100%;height:100%;border:0;background:#000" `+
-    `allowtransparency="true" frameborder="0" scrolling="no" `+
-    `allow="clipboard-write" referrerpolicy="no-referrer"></iframe>`;
+  G.tvSeries = G.tvChart.addCandlestickSeries({
+    upColor:        '#22ab94',  downColor:    '#ef534f',
+    borderUpColor:  '#22ab94',  borderDownColor:'#ef534f',
+    wickUpColor:    '#22ab94',  wickDownColor:'#ef534f',
+    priceFormat:    {type:'price', precision:2, minMove:0.05},
+  });
+  // Replay the buffer for this instrument so timeframe switches do not
+  // wipe history we already captured.
+  const bars = G.chartBars[G.inst] || [];
+  if(bars.length) G.tvSeries.setData(bars);
+  G.tvLastInst = G.inst;
+  // If this is the first mount and the spot is known, seed a single
+  // candle so the chart is not blank for the first tick.
+  if(!bars.length && G.spot[G.inst] > 0){
+    pushTickToChart(G.spot[G.inst], Date.now());
+  }
+  // Responsive resize.
+  if(G._tvRO) G._tvRO.disconnect();
+  G._tvRO = new ResizeObserver(()=>{
+    if(G.tvChart) G.tvChart.applyOptions({width: host.clientWidth, height: 300});
+  });
+  G._tvRO.observe(host);
 }
 function setChartTf(btn, m){
   G.chartTf = m;
   document.querySelectorAll('[data-tvtf]').forEach(b=>b.classList.remove('btn-b'));
   if(btn) btn.classList.add('btn-b');
+  // Re-bucket existing bars at the new TF by replaying close prices.
+  const flat = (G.chartBars[G.inst] || []).map(b => [b.time*1000, b.close]);
+  G.chartBars[G.inst] = [];
+  for(const [ts, p] of flat) pushTickToChart(p, ts);
   mountChart();
 }
 
