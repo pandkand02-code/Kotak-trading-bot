@@ -678,15 +678,19 @@ async function testQuoteAPI(){
   log('Testing Kotak Quote API directly...','info');
   try{
     const res = await api('/quotes/market_data',{session_id:G.sid,instrument:G.inst});
-    // Print the LTP, the computed change, AND the raw Kotak item so we can
-    // see the actual field names Kotak returned. If change still looks
-    // wrong, screenshot the raw_ltp_item line and I can add the missing
-    // alias in one targeted commit.
     log('Quote: ltp='+res.ltp+' chg='+res.change+'% chg_abs='+res.change_abs+' prev_close='+res.prev_close+' open='+res.open,'trade');
-    if(res.raw_ltp_item){
-      log('Raw Kotak item: '+JSON.stringify(res.raw_ltp_item),'info');
+    if(res.raw_yahoo){
+      log('Yahoo OHLC: '+JSON.stringify(res.raw_yahoo),'success');
     } else {
-      log('Quote API response (no raw_ltp_item): '+JSON.stringify(res).substring(0,800),'trade');
+      log('Yahoo OHLC FAILED: '+(res.yahoo_error||'?'),'warn');
+    }
+    if(res.raw_qq){
+      log('Kotak /quick/quotes: '+JSON.stringify(res.raw_qq).substring(0,500),'info');
+    } else {
+      log('Kotak /quick/quotes FAILED: '+(res.qq_error||'no body'),'warn');
+    }
+    if(res.raw_ltp_item){
+      log('Raw Kotak /script-details: '+JSON.stringify(res.raw_ltp_item),'info');
     }
   }catch(e){
     log('Quote API test failed: '+e.message,'error');
