@@ -624,30 +624,66 @@ async def get_market_data(req: QuoteRequest):
     sess = get_session(req.session_id)
 
     async with httpx.AsyncClient(timeout=15) as c:
+        # Pull LTP + OHLC in parallel for the underlying. The OHLC payload
+        # carries Kotak's authoritative session open / high / low / prev
+        # close — without it, change% would be (ltp - first_tick_we_saw)
+        # which is the change since the user logged in, not since 09:15
+        # NSE session open. That misleads the AI signal *and* breaks the
+        # day-change header (user reported NIFTY shown as +0.02% when
+        # Kotak Neo app showed +0.20%).
         ltp_inst, err_inst = await _ltp_via_script_details(c, sess, inst["neo_symbol"], inst["exchange_segment"])
+        ohlc_raw, ohlc_err = await _ohlc_via_script_details(c, sess, inst["neo_symbol"], inst["exchange_segment"])
         ltp_vix,  err_vix  = await _ltp_via_script_details(c, sess, vix["neo_symbol"],  vix["exchange_segment"])
 
+    def _pick(item, *keys):
+        """Kotak ships open/high/low/prev-close under several aliases
+        depending on the segment (op/open/openPrice; c/close/prevClose).
+        Lower-case lookup returns the first non-empty match as float."""
+        if not isinstance(item, dict):
+            return None
+        ci = {k.lower(): k for k in item.keys()}
+        for k in keys:
+            rk = ci.get(k.lower())
+            if rk and item.get(rk) not in (None, "", "0", 0):
+                try:
+                    return float(item[rk])
+                except (TypeError, ValueError):
+                    continue
+        return None
+
+    real_open  = _pick(ohlc_raw, "op", "open", "openPrice", "open_price")
+    real_high  = _pick(ohlc_raw, "hp", "high", "highPrice", "dayHigh", "high_price")
+    real_low   = _pick(ohlc_raw, "lp", "low",  "lowPrice",  "dayLow",  "low_price")
+    prev_close = _pick(ohlc_raw, "c",  "close", "prevClose", "previousClose", "prev_close", "yc")
+
     if ltp_inst is not None and ltp_inst > 0:
-        # Record the tick into the intraday recorder so the AI signal layer
-        # gets real open/high/low/change% derived from the session's price
-        # history. Without this, every Claude call sees change=0 and outputs
-        # WAIT/NEUTRAL because there's no real price action to reason about.
+        # Record the tick so momentum_5m still works. We deliberately do
+        # NOT use the recorder's "open" / "change" any more — those are
+        # session-local to the bot process. Kotak's open is authoritative.
         stats = tick_recorder.record(req.instrument.upper(), ltp_inst)
         if ltp_vix and ltp_vix > 0:
             tick_recorder.record("VIX", ltp_vix)
+
+        # Day-change reference: prefer Kotak's previous close (matches
+        # the Neo app display), then today's open, then the recorder's
+        # fallback open as the last resort.
+        ref = prev_close or real_open or stats.get("open") or ltp_inst
+        change_pct = ((ltp_inst - ref) / ref * 100) if ref else 0.0
         return {
             "success":     True,
             "instrument":  req.instrument,
             "ltp":         ltp_inst,
             "vix":         ltp_vix or 0,
-            "open":        stats.get("open", ltp_inst),
-            "high":        stats.get("high", ltp_inst),
-            "low":         stats.get("low", ltp_inst),
-            "close":       stats.get("open", ltp_inst),  # session open as best-known prev ref
-            "change":      stats.get("change", 0),
+            "open":        real_open  or stats.get("open",  ltp_inst),
+            "high":        real_high  or stats.get("high",  ltp_inst),
+            "low":         real_low   or stats.get("low",   ltp_inst),
+            "close":       prev_close or stats.get("open",  ltp_inst),
+            "prev_close":  prev_close or 0,
+            "change":      round(change_pct, 3),
             "momentum_5m": stats.get("momentum_5m", 0),
             "ticks_count": stats.get("ticks_count", 1),
-            "source":      "script-details/ltp",
+            "source":      "script-details/ohlc+ltp" if ohlc_raw else "script-details/ltp",
+            "ohlc_error":  ohlc_err,
         }
 
     # REST failed — fall back to the WebSocket streamer (kept around for this).
