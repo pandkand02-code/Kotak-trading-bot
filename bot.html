@@ -160,6 +160,52 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
 .ai-hint{padding:8px 12px;border-radius:8px;font-size:11px;text-align:center;margin-bottom:10px;background:#ff980018;border:1px solid #ff980040;color:var(--gold);font-weight:500}
 .step-ok{font-size:12px;color:var(--green);text-align:center;padding:9px;background:#22ab9418;border-radius:8px;margin-bottom:8px;font-weight:500}
 .totp-t{font-size:16px;font-weight:700;min-width:44px;text-align:center}
+
+/* ── GROWW-FLAVOURED COMPONENTS (SIGNAL tab top) ───────────────────────── */
+/* Market-indices quick-view cards (NIFTY + SENSEX side by side) */
+.mi-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px}
+.mi{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:13px 14px;cursor:pointer;transition:background .12s, border-color .12s}
+.mi:hover{background:var(--panel-hi)}
+.mi.active{border-color:var(--accent);background:#2962ff10}
+.mi-name{font-size:13px;font-weight:700;color:var(--bright);letter-spacing:.4px}
+.mi-px{font-size:19px;font-weight:800;color:var(--bright);margin-top:8px;font-variant-numeric:tabular-nums;line-height:1}
+.mi-ch{font-size:12px;font-weight:600;margin-top:4px;font-variant-numeric:tabular-nums}
+
+/* Symbol header on chart card — big symbol, big price */
+.sym-hdr{display:flex;justify-content:space-between;align-items:flex-start;padding:16px 18px;border-bottom:1px solid var(--border)}
+.sym-l-name{font-size:22px;font-weight:800;color:var(--bright);letter-spacing:.3px;line-height:1}
+.sym-l-sub{font-size:11px;color:var(--dim);margin-top:5px;font-weight:500;letter-spacing:.3px}
+.sym-r-px{font-size:22px;font-weight:800;text-align:right;color:var(--bright);font-variant-numeric:tabular-nums;line-height:1}
+.sym-r-ch{display:inline-flex;align-items:center;gap:5px;font-size:13px;font-weight:600;margin-top:6px;padding:3px 9px;border-radius:14px;letter-spacing:.2px}
+.sym-r-ch.up{background:#22ab9418;color:var(--green)}
+.sym-r-ch.dn{background:#ef534f18;color:var(--red)}
+.sym-r-ch::before{content:'';width:7px;height:7px;border-radius:50%;background:currentColor}
+.sym-return{padding:8px 16px;display:flex;justify-content:space-between;align-items:center;font-size:11px;font-weight:600;color:var(--dim);letter-spacing:.5px;text-transform:uppercase;border-bottom:1px solid var(--border)}
+.sym-return-val{font-size:13px;font-weight:700;font-variant-numeric:tabular-nums;text-transform:none}
+
+/* Timeframe pill row (1m 5m 15m 30m 1D + chart-mode toggle) */
+.tf-row{display:flex;gap:7px;padding:12px 16px;align-items:center;border-top:1px solid var(--border);flex-wrap:wrap}
+.tf-chip{padding:6px 14px;border-radius:20px;font-size:12px;color:var(--text);background:transparent;border:1px solid var(--border);cursor:pointer;font-weight:600;letter-spacing:.3px;font-family:inherit;transition:all .12s}
+.tf-chip.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+.tf-chip:hover:not(.on){background:var(--panel-hi)}
+.tf-mode{margin-left:auto;width:34px;height:32px;display:flex;align-items:center;justify-content:center;background:var(--panel-hi);border-radius:6px;cursor:pointer;color:var(--bright);border:1px solid var(--border);font-size:13px;font-weight:700;letter-spacing:-1px}
+.tf-mode.on{border-color:var(--accent);color:var(--accent);background:#2962ff10}
+
+/* Live market snapshot — today's range + 52w range slider */
+.snap-row{padding:14px 18px;border-bottom:1px solid var(--border)}
+.snap-row:last-child{border-bottom:none}
+.snap-lbls{display:flex;justify-content:space-between;font-size:11px;color:var(--dim);font-weight:500;text-transform:uppercase;letter-spacing:.4px}
+.snap-vals{display:flex;justify-content:space-between;font-size:14px;color:var(--bright);font-weight:700;margin-top:3px;font-variant-numeric:tabular-nums}
+.snap-bar{position:relative;height:3px;border-radius:3px;background:var(--border);margin:18px 4px 4px}
+.snap-marker{position:absolute;top:-5px;width:0;height:0;border-left:7px solid transparent;border-right:7px solid transparent;border-bottom:10px solid var(--green);transform:translateX(-50%);transition:left .4s ease;filter:drop-shadow(0 0 4px #22ab9466)}
+.snap-marker.dn{border-bottom-color:var(--red);filter:drop-shadow(0 0 4px #ef534f66)}
+
+/* Trade-from-charts callout */
+.tfc{display:flex;justify-content:space-between;align-items:center;padding:14px 16px;background:linear-gradient(90deg, #0d1a2e, #0e0e0e);border:1px solid var(--border);border-radius:12px;margin-bottom:14px;cursor:pointer;transition:border-color .12s}
+.tfc:hover{border-color:var(--accent)}
+.tfc-l-t{font-size:14px;font-weight:700;color:var(--bright)}
+.tfc-l-s{font-size:11px;color:var(--dim);margin-top:3px;font-weight:500}
+.tfc-r{font-size:18px;color:var(--accent);font-weight:700}
 </style>
 <!-- Lightweight Charts (Apache-2.0, made by TradingView). Renders OHLC
      candles from data WE supply — no third-party data entitlement
@@ -207,21 +253,102 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
 
   <!-- SIGNAL -->
   <div id="t-signal">
-    <!-- Real-time chart from TradingView's free embed widget. Symbol swaps
-         with G.inst (NIFTY → NSE:NIFTY, SENSEX → BSE:SENSEX). Lives at the
-         top of SIGNAL so the bot's call is visible alongside the price
-         action that drove it. -->
-    <div class="card">
-      <div class="ch">
-        <span class="ct"><span id="tvSymLbl">NIFTY</span> · CHART</span>
-        <div style="display:flex;gap:6px">
-          <button class="btn btn-sm" data-tvtf="1" onclick="setChartTf(this,1)">1m</button>
-          <button class="btn btn-sm" data-tvtf="5" onclick="setChartTf(this,5)">5m</button>
-          <button class="btn btn-sm" data-tvtf="15" onclick="setChartTf(this,15)">15m</button>
+
+    <!-- Market-indices quick view (Groww-style horizontal pair). Tap one
+         to make it the active instrument across the bot. -->
+    <div class="mi-row">
+      <div class="mi active" id="mi-NIFTY" onclick="selectIndex('NIFTY')">
+        <div class="mi-name">NIFTY</div>
+        <div class="mi-px"  id="mi-NIFTY-px">—</div>
+        <div class="mi-ch"  id="mi-NIFTY-ch">—</div>
+      </div>
+      <div class="mi" id="mi-SENSEX" onclick="selectIndex('SENSEX')">
+        <div class="mi-name">SENSEX</div>
+        <div class="mi-px"  id="mi-SENSEX-px">—</div>
+        <div class="mi-ch"  id="mi-SENSEX-ch">—</div>
+      </div>
+    </div>
+
+    <!-- Chart card with Groww-style header + area chart + TF pills. -->
+    <div class="card" style="padding:0">
+      <div class="sym-hdr">
+        <div>
+          <div class="sym-l-name" id="symName">NIFTY</div>
+          <div class="sym-l-sub"  id="symSub">Nifty 50 · NSE</div>
+        </div>
+        <div>
+          <div class="sym-r-px" id="symPx">—</div>
+          <div class="sym-r-ch up" id="symCh">—</div>
         </div>
       </div>
+      <div class="sym-return">
+        <span>SESSION RETURN</span>
+        <span class="sym-return-val" id="symRet" style="color:var(--green)">—</span>
+      </div>
       <div id="tvChart" style="height:300px;background:#000"></div>
+      <div class="tf-row">
+        <button class="tf-chip on" data-tvtf="1"    onclick="setChartTf(this,1)">1m</button>
+        <button class="tf-chip"    data-tvtf="5"    onclick="setChartTf(this,5)">5m</button>
+        <button class="tf-chip"    data-tvtf="15"   onclick="setChartTf(this,15)">15m</button>
+        <button class="tf-chip"    data-tvtf="30"   onclick="setChartTf(this,30)">30m</button>
+        <button class="tf-chip"    data-tvtf="60"   onclick="setChartTf(this,60)">1H</button>
+        <div class="tf-mode on" id="modeChip" onclick="toggleChartMode()" title="Toggle area / candle">▮▮</div>
+      </div>
     </div>
+
+    <!-- Trade-from-Charts callout. Reuses the existing order-entry panel
+         in the CHAIN tab, so the user lands on the same flow as a
+         manual strike-tap. -->
+    <div class="tfc" onclick="gt('chain')">
+      <div>
+        <div class="tfc-l-t">Trade from Charts</div>
+        <div class="tfc-l-s">Pick ATM CE/PE on the live option chain</div>
+      </div>
+      <div class="tfc-r">→</div>
+    </div>
+
+    <!-- Live market snapshot — today's range (open / high / low / spot). -->
+    <div class="card">
+      <div class="ch">
+        <span class="ct">Live market snapshot</span>
+        <span class="badge bg" id="snapLive">● LIVE</span>
+      </div>
+      <div class="snap-row">
+        <div class="snap-lbls"><span>Today's low</span><span>Today's high</span></div>
+        <div class="snap-vals"><span id="snapLow">—</span><span id="snapHigh">—</span></div>
+        <div class="snap-bar"><div class="snap-marker" id="snapMarker" style="left:50%"></div></div>
+      </div>
+      <div class="snap-row">
+        <div class="snap-lbls"><span>Session open</span><span>Spot</span></div>
+        <div class="snap-vals"><span id="snapOpen">—</span><span id="snapSpot">—</span></div>
+      </div>
+    </div>
+
+    <!-- Technicals card — live numeric values computed from the bar
+         buffer (RSI, MACD, EMA9/EMA20) plus ATM-strike OI + Volume from
+         the Kotak quote feed. These complement the qualitative indicator
+         chips in the AI Signal Engine card below. -->
+    <div class="card">
+      <div class="ch">
+        <span class="ct">Technicals</span>
+        <span class="badge" id="techVerdict" style="border:1px solid var(--dim);color:var(--dim)">—</span>
+      </div>
+      <div class="pos-g" style="padding:14px 16px;grid-template-columns:1fr 1fr 1fr;gap:8px">
+        <div class="pi"><div class="pil">RSI(14)</div><div class="piv" id="tech-rsi">—</div></div>
+        <div class="pi"><div class="pil">MACD</div><div class="piv" id="tech-macd">—</div></div>
+        <div class="pi"><div class="pil">Signal</div><div class="piv" id="tech-mAction">—</div></div>
+        <div class="pi"><div class="pil">EMA9</div><div class="piv" id="tech-ema9">—</div></div>
+        <div class="pi"><div class="pil">EMA20</div><div class="piv" id="tech-ema20">—</div></div>
+        <div class="pi"><div class="pil">VWAP</div><div class="piv" id="tech-vwap">—</div></div>
+        <div class="pi"><div class="pil">ATM CE OI</div><div class="piv" id="tech-ceOi">—</div></div>
+        <div class="pi"><div class="pil">ATM PE OI</div><div class="piv" id="tech-peOi">—</div></div>
+        <div class="pi"><div class="pil">PCR</div><div class="piv" id="tech-pcr">—</div></div>
+        <div class="pi"><div class="pil">CE Vol</div><div class="piv" id="tech-ceVol">—</div></div>
+        <div class="pi"><div class="pil">PE Vol</div><div class="piv" id="tech-peVol">—</div></div>
+        <div class="pi"><div class="pil">Bias</div><div class="piv" id="tech-bias">—</div></div>
+      </div>
+    </div>
+
     <div class="card">
       <div class="ch"><span class="ct">AI Signal Engine</span><span class="badge bd" id="sigBadge">IDLE</span></div>
       <div class="cb" style="text-align:center;padding:20px 14px">
@@ -517,8 +644,13 @@ async function fetchLiveMarketData(){
       el.style.color=chng>=0?'var(--green)':'var(--red)';
       if(res.vix && res.vix>0) G.liveVix=res.vix;
       buildChain();
-      quickLean();         // sub-cycle direction refresh (no LLM call)
-      pushTickToChart(res.ltp, Date.now());   // feed live tick → chart
+      quickLean();                                      // sub-cycle direction refresh (no LLM call)
+      pushTickToChart(res.ltp, Date.now());             // feed live tick → chart
+      updateSymbolHeader(res.ltp, chng, res.open || 0); // big header price + green/red chip
+      updateSnapshot();                                 // today's high/low slider
+      paintMiCard(G.inst, res.ltp, chng);               // active market card
+      fetchOtherIndex();                                // keep the OTHER card live too
+      refreshTechnicals();                              // RSI/MACD/EMA/VWAP/Bias from chart bars
       log('✅ REAL: '+G.inst+' ₹'+res.ltp.toFixed(2)+' | Chg:'+(chng>=0?'+':'')+chng.toFixed(2)+'% | VIX:'+(res.vix?res.vix.toFixed(2):'—'),'success');
       _onQuoteOk();
     } else {
@@ -918,6 +1050,7 @@ function _renderChain(){
 // from CDN in <head>). Bar timestamps are unix-seconds, IST.
 G.chartTf       = 1;              // default 1-minute candles so the chart
                                   // fills within a minute of session start
+G.chartMode     = 'area';         // 'area' (gradient line, Groww-style) or 'candles'
 G.chartBars     = {};             // {NIFTY:[bar,…], SENSEX:[bar,…]}
 G.tvChart       = null;
 G.tvSeries      = null;
@@ -947,21 +1080,27 @@ function pushTickToChart(price, ts /* ms */, inst){
     bar = last;
   }
   if(inst === G.inst && G.tvSeries){
-    try { G.tvSeries.update(bar); } catch(_){}
+    try {
+      if(G.chartMode === 'area'){
+        G.tvSeries.update({time: bar.time, value: bar.close});
+      } else {
+        G.tvSeries.update(bar);
+      }
+    } catch(_){}
   }
 }
 
 function mountChart(){
   const host = document.getElementById('tvChart');
   if(!host) return;
-  document.getElementById('tvSymLbl').textContent = G.inst;
+  const symLbl = document.getElementById('tvSymLbl'); if(symLbl) symLbl.textContent = G.inst;
   // Library still loading? show a tiny notice and retry shortly.
   if(!window.LightweightCharts){
     host.innerHTML = '<div style="padding:24px;color:var(--dim);font-size:12px;text-align:center">Loading chart engine…</div>';
     setTimeout(mountChart, 250);
     return;
   }
-  // Tear down any existing chart before remounting (timeframe / inst swap).
+  // Tear down any existing chart before remounting (timeframe / mode / inst swap).
   host.innerHTML = '';
   G.tvChart = LightweightCharts.createChart(host, {
     width:  host.clientWidth,
@@ -974,19 +1113,32 @@ function mountChart(){
     handleScroll:    {mouseWheel:true, pressedMouseMove:true, horzTouchDrag:true},
     handleScale:     {axisPressedMouseMove:true, mouseWheel:true, pinch:true},
   });
-  G.tvSeries = G.tvChart.addCandlestickSeries({
-    upColor:        '#22ab94',  downColor:    '#ef534f',
-    borderUpColor:  '#22ab94',  borderDownColor:'#ef534f',
-    wickUpColor:    '#22ab94',  wickDownColor:'#ef534f',
-    priceFormat:    {type:'price', precision:2, minMove:0.05},
-  });
-  // Replay the buffer for this instrument so timeframe switches do not
-  // wipe history we already captured.
   const bars = G.chartBars[G.inst] || [];
-  if(bars.length) G.tvSeries.setData(bars);
+  // Pick series shape from G.chartMode. The session direction (up/down)
+  // tints the area-mode gradient so a flat market shows neutral, a
+  // rising market gets a mint fill, falling gets coral.
+  const upSession = bars.length ? (bars[bars.length-1].close >= bars[0].open) : true;
+  if(G.chartMode === 'area'){
+    G.tvSeries = G.tvChart.addAreaSeries({
+      lineColor:   upSession ? '#22ab94' : '#ef534f',
+      topColor:    upSession ? '#22ab9477' : '#ef534f77',
+      bottomColor: upSession ? '#22ab9400' : '#ef534f00',
+      lineWidth:   2,
+      priceFormat: {type:'price', precision:2, minMove:0.05},
+    });
+    const flat = bars.map(b => ({time:b.time, value:b.close}));
+    if(flat.length) G.tvSeries.setData(flat);
+  } else {
+    G.tvSeries = G.tvChart.addCandlestickSeries({
+      upColor:        '#22ab94',  downColor:    '#ef534f',
+      borderUpColor:  '#22ab94',  borderDownColor:'#ef534f',
+      wickUpColor:    '#22ab94',  wickDownColor:'#ef534f',
+      priceFormat:    {type:'price', precision:2, minMove:0.05},
+    });
+    if(bars.length) G.tvSeries.setData(bars);
+  }
   G.tvLastInst = G.inst;
-  // If this is the first mount and the spot is known, seed a single
-  // candle so the chart is not blank for the first tick.
+  // Seed a starter point so the chart is never blank for the first tick.
   if(!bars.length && G.spot[G.inst] > 0){
     pushTickToChart(G.spot[G.inst], Date.now());
   }
@@ -996,6 +1148,17 @@ function mountChart(){
     if(G.tvChart) G.tvChart.applyOptions({width: host.clientWidth, height: 300});
   });
   G._tvRO.observe(host);
+}
+
+// Toggle between area (gradient line, default) and OHLC candles.
+function toggleChartMode(){
+  G.chartMode = (G.chartMode === 'area') ? 'candles' : 'area';
+  const chip = document.getElementById('modeChip');
+  if(chip){
+    chip.textContent = G.chartMode === 'area' ? '▮▮' : '◆';
+    chip.classList.toggle('on', G.chartMode === 'candles');
+  }
+  mountChart();
 }
 function setChartTf(btn, m){
   G.chartTf = m;
@@ -1076,11 +1239,242 @@ function selRow(i){
 
 function onInst(){
   G.inst=document.getElementById('inst').value;
-  document.getElementById('lsLbl').textContent=LS[G.inst];
-  G.selRow=null; document.getElementById('orderBox').style.display='none';
-  G.lastChainFetch = 0; // force chain rebuild for the new instrument
+  selectIndex(G.inst);
+}
+
+// Click handler for the top market-indices cards. Single source of truth
+// for instrument switching — buildChain, chart re-mount, dropdown sync,
+// market-card visual state, snapshot card all driven from here.
+function selectIndex(name){
+  G.inst = name;
+  // Sync the dropdown if its value differs.
+  const sel = document.getElementById('inst');
+  if(sel && sel.value !== name) sel.value = name;
+  document.getElementById('lsLbl').textContent = LS[G.inst];
+  G.selRow = null;
+  const ob = document.getElementById('orderBox'); if(ob) ob.style.display = 'none';
+  G.lastChainFetch = 0;
+  // Symbol header text.
+  const meta = {
+    NIFTY:  {sub:'Nifty 50 · NSE'},
+    SENSEX: {sub:'BSE Sensex · BSE'},
+  };
+  const symName = document.getElementById('symName');
+  const symSub  = document.getElementById('symSub');
+  if(symName) symName.textContent = G.inst;
+  if(symSub)  symSub.textContent  = (meta[G.inst]?.sub) || G.inst;
+  // Market-card active state.
+  document.querySelectorAll('.mi').forEach(el => el.classList.toggle('active', el.id === 'mi-'+G.inst));
+  // Refresh visuals.
   buildChain();
-  mountChart();         // swap the TV chart to the new symbol
+  mountChart();
+  updateSnapshot();
+}
+
+// Fill the symbol header + green/red change chip. Called every quote tick.
+function updateSymbolHeader(ltp, chgPct, open){
+  const px = document.getElementById('symPx');
+  const ch = document.getElementById('symCh');
+  const rt = document.getElementById('symRet');
+  if(px) px.textContent = '₹' + Number(ltp || 0).toFixed(2);
+  const up = chgPct >= 0;
+  const absDelta = open ? (ltp - open) : 0;
+  if(ch){
+    ch.textContent = (up?'▲ ':'▼ ') + (absDelta>=0?'+':'') + absDelta.toFixed(2) + '  (' + (up?'+':'') + chgPct.toFixed(2) + '%)';
+    ch.classList.toggle('up',  up);
+    ch.classList.toggle('dn', !up);
+  }
+  if(rt){
+    rt.textContent = (up?'+':'') + chgPct.toFixed(2) + '%';
+    rt.style.color = up ? 'var(--green)' : 'var(--red)';
+  }
+}
+
+// Today's-range slider + open/spot pair. Driven by /quotes/market_data
+// response which carries open / high / low / change.
+function updateSnapshot(){
+  const md = G.marketData[G.inst] || {};
+  const o  = +(md.open || 0);
+  const h  = +(md.high || 0);
+  const l  = +(md.low  || 0);
+  const s  = +(G.spot[G.inst] || md.ltp || 0);
+  const $ = id => document.getElementById(id);
+  if($('snapLow'))  $('snapLow').textContent  = l > 0 ? l.toFixed(2) : '—';
+  if($('snapHigh')) $('snapHigh').textContent = h > 0 ? h.toFixed(2) : '—';
+  if($('snapOpen')) $('snapOpen').textContent = o > 0 ? o.toFixed(2) : '—';
+  if($('snapSpot')) $('snapSpot').textContent = s > 0 ? s.toFixed(2) : '—';
+  const m = $('snapMarker');
+  if(m && h > l && s >= l && s <= h){
+    const pct = ((s - l) / (h - l)) * 100;
+    m.style.left = pct.toFixed(2) + '%';
+    m.classList.toggle('dn', md.change != null && md.change < 0);
+  }
+}
+
+// Populate one market-indices card. Called for both NIFTY and SENSEX so
+// both cards stay live regardless of which one is active.
+function paintMiCard(name, ltp, chgPct){
+  const px = document.getElementById('mi-'+name+'-px');
+  const ch = document.getElementById('mi-'+name+'-ch');
+  if(!px || !ch) return;
+  if(!ltp || ltp <= 0){ px.textContent = '—'; ch.textContent = '—'; return; }
+  px.textContent = ltp.toFixed(2);
+  const up = (chgPct || 0) >= 0;
+  ch.textContent = (up?'+':'') + (chgPct||0).toFixed(2) + '%';
+  ch.style.color = up ? 'var(--green)' : 'var(--red)';
+}
+
+// Fetch the OTHER index's spot in the background so its card stays live
+// even while we're focused on G.inst. Costs one extra /quotes/market_data
+// call per 5 s tick — well inside the 600/min general rate cap.
+// ── TECHNICAL INDICATORS (client-side from chart bars) ────────────────────
+// Computed on every quote tick from the bar buffer the chart already
+// maintains. Pure JS — no extra API calls. The qualitative chips in the
+// AI Signal Engine card remain (driven by Claude); these numbers expose
+// the underlying values a pro trader looks at: RSI, MACD, EMA9/EMA20,
+// VWAP-style mid, plus ATM CE+PE OI and Volume from Kotak.
+function _ema(values, period){
+  if(values.length < period) return null;
+  const k = 2 / (period + 1);
+  let e = values.slice(0, period).reduce((a,b)=>a+b, 0) / period;
+  for(let i = period; i < values.length; i++){ e = values[i]*k + e*(1-k); }
+  return e;
+}
+function _rsi(values, period){
+  period = period || 14;
+  if(values.length <= period) return null;
+  let g = 0, l = 0;
+  for(let i = 1; i <= period; i++){
+    const d = values[i] - values[i-1];
+    if(d >= 0) g += d; else l += -d;
+  }
+  g /= period; l /= period;
+  for(let i = period+1; i < values.length; i++){
+    const d = values[i] - values[i-1];
+    g = (g*(period-1) + (d>0?d:0)) / period;
+    l = (l*(period-1) + (d<0?-d:0)) / period;
+  }
+  if(l === 0) return 100;
+  return 100 - (100 / (1 + g/l));
+}
+function _macd(values){
+  if(values.length < 26) return null;
+  const e12 = _ema(values, 12), e26 = _ema(values, 26);
+  if(e12 == null || e26 == null) return null;
+  return e12 - e26;
+}
+function _vwap(bars){
+  // True VWAP needs volume. We approximate with a typical-price simple
+  // average across the session bars — close enough for direction.
+  if(!bars.length) return null;
+  let acc = 0;
+  for(const b of bars){ acc += (b.high + b.low + b.close) / 3; }
+  return acc / bars.length;
+}
+
+function refreshTechnicals(){
+  const bars = G.chartBars[G.inst] || [];
+  const closes = bars.map(b => b.close);
+  const md = G.marketData[G.inst] || {};
+  const spot = +(G.spot[G.inst] || md.ltp || 0);
+  const rsiV  = _rsi(closes, 14);
+  const macdV = _macd(closes);
+  const ema9  = _ema(closes, 9);
+  const ema20 = _ema(closes, 20);
+  const vwap  = _vwap(bars);
+  const $ = id => document.getElementById(id);
+
+  if($('tech-rsi'))  $('tech-rsi').textContent  = rsiV  != null ? rsiV.toFixed(1)  : '—';
+  if($('tech-macd')) $('tech-macd').textContent = macdV != null ? macdV.toFixed(2) : '—';
+  if($('tech-ema9')) $('tech-ema9').textContent = ema9  != null ? ema9.toFixed(2)  : '—';
+  if($('tech-ema20'))$('tech-ema20').textContent= ema20 != null ? ema20.toFixed(2) : '—';
+  if($('tech-vwap')) $('tech-vwap').textContent = vwap  != null ? vwap.toFixed(2)  : '—';
+  // RSI colour: >70 overbought (red), <30 oversold (green), else neutral.
+  if($('tech-rsi') && rsiV != null){
+    $('tech-rsi').style.color = rsiV > 70 ? 'var(--red)' : rsiV < 30 ? 'var(--green)' : 'var(--bright)';
+  }
+  // MACD-based action — most popular pro-trader signal.
+  if($('tech-mAction')){
+    if(macdV == null){
+      $('tech-mAction').textContent = '—';
+      $('tech-mAction').style.color = 'var(--dim)';
+    } else if(macdV > 0){
+      $('tech-mAction').textContent = 'BUY CE';
+      $('tech-mAction').style.color = 'var(--green)';
+    } else {
+      $('tech-mAction').textContent = 'BUY PE';
+      $('tech-mAction').style.color = 'var(--red)';
+    }
+  }
+  // Vote-based overall bias verdict (RSI + MACD + EMA cross + spot/VWAP).
+  let votes = 0;
+  if(rsiV  != null) votes += (rsiV  > 55 ? 1 : (rsiV  < 45 ? -1 : 0));
+  if(macdV != null) votes += (macdV >  0 ? 1 : (macdV <  0 ? -1 : 0));
+  if(ema9  != null && ema20 != null) votes += (ema9 > ema20 ? 1 : -1);
+  if(spot && vwap) votes += (spot > vwap ? 1 : -1);
+  const bias = votes >=  2 ? 'BULLISH · CE'
+             : votes <= -2 ? 'BEARISH · PE'
+             :              'NEUTRAL';
+  const c = votes >=  2 ? 'var(--green)'
+          : votes <= -2 ? 'var(--red)'
+          :              'var(--dim)';
+  if($('tech-bias'))    { $('tech-bias').textContent    = bias; $('tech-bias').style.color = c; }
+  if($('techVerdict'))  { $('techVerdict').textContent  = bias; $('techVerdict').style.color = c; $('techVerdict').style.borderColor = c; }
+}
+
+// ATM OI + Volume poller — calls the new /quotes/option_full backend
+// every 20 s while the SIGNAL tab is in focus. PCR = peOi / ceOi.
+G._techIv = null;
+async function refreshAtmOiVol(){
+  if(!G.sid || !G.chain || !G.chain.length) return;
+  const atm = G.chain.find(r => r.atm);
+  if(!atm || !atm.ce?.p_symbol || !atm.pe?.p_symbol) return;
+  const seg = G.inst === 'SENSEX' ? 'bse_fo' : 'nse_fo';
+  try{
+    const r = await api('/quotes/option_full', {
+      session_id: G.sid,
+      legs: [
+        {p_symbol: atm.ce.p_symbol, exchange: seg},
+        {p_symbol: atm.pe.p_symbol, exchange: seg},
+      ],
+    });
+    const ce = r.legs[0] || {}, pe = r.legs[1] || {};
+    const fmt = (n) => {
+      if(!n) return '—';
+      if(n >= 1e7) return (n/1e7).toFixed(2)+'Cr';
+      if(n >= 1e5) return (n/1e5).toFixed(2)+'L';
+      if(n >= 1e3) return (n/1e3).toFixed(1)+'K';
+      return String(n);
+    };
+    const $ = id => document.getElementById(id);
+    if($('tech-ceOi'))  $('tech-ceOi').textContent  = fmt(ce.oi);
+    if($('tech-peOi'))  $('tech-peOi').textContent  = fmt(pe.oi);
+    if($('tech-ceVol')) $('tech-ceVol').textContent = fmt(ce.vol);
+    if($('tech-peVol')) $('tech-peVol').textContent = fmt(pe.vol);
+    if($('tech-pcr')){
+      const pcr = (ce.oi && ce.oi > 0) ? (pe.oi / ce.oi) : null;
+      $('tech-pcr').textContent = pcr != null ? pcr.toFixed(2) : '—';
+      $('tech-pcr').style.color = pcr == null ? 'var(--dim)' : pcr > 1.2 ? 'var(--green)' : pcr < 0.8 ? 'var(--red)' : 'var(--bright)';
+    }
+  }catch(_){ /* silent — the chip stays at last value */ }
+}
+// Kick off the periodic refresh once. Mounted at module load.
+function _startTechLoop(){
+  if(G._techIv) clearInterval(G._techIv);
+  refreshAtmOiVol();
+  G._techIv = setInterval(refreshAtmOiVol, 20000);
+}
+
+async function fetchOtherIndex(){
+  if(!G.sid) return;
+  const other = G.inst === 'NIFTY' ? 'SENSEX' : 'NIFTY';
+  try{
+    const r = await api('/quotes/market_data', {session_id:G.sid, instrument: other});
+    if(r && r.ltp > 0){
+      G.spot[other] = r.ltp;
+      paintMiCard(other, r.ltp, r.change || 0);
+    }
+  }catch(_){ /* don't spam log; one failed background fetch is fine */ }
 }
 function chgLots(d){G.lots=Math.max(1,Math.min(10,G.lots+d));document.getElementById('lotsV').textContent=G.lots;}
 
@@ -1771,7 +2165,7 @@ async function restoreSession(){
 }
 
 // ── INIT ──────────────────────────────────────────────────────────────────
-buildChain(); chkServer(); mountChart();
+buildChain(); chkServer(); mountChart(); _startTechLoop();
 log('NEXUS Bot v3 ready — Real Kotak API connected.','info');
 log('Tap WALLET → authenticate → real NIFTY price feeds automatically.','info');
 log('Position monitor: REAL Kotak LTP polling every '+ (typeof MON_POLL_MS!=='undefined'?MON_POLL_MS:3000) +' ms. Exits place a real SELL @ MKT.','info');

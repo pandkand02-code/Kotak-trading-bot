@@ -686,6 +686,86 @@ class OptionLtpRequest(BaseModel):
     exchange:   str = "nse_fo"
 
 
+# Full quote helper — same auth + base URL as _ltp_via_script_details, just
+# the /ohlc path so we can scrape OI + volume in one round-trip per leg.
+async def _ohlc_via_script_details(c: httpx.AsyncClient, sess: dict, neo_symbol: str, exch: str):
+    """Hit /script-details/1.0/quotes/neosymbol/{exch}|{symbol}/ohlc.
+
+    Returns (item_dict_or_None, error). Caller pulls oi/vol/ltp keys —
+    Kotak's field names vary between accounts so we look for several
+    aliases when parsing on the frontend.
+    """
+    base = sess["base_url"].rstrip("/")
+    url  = f"{base}/script-details/1.0/quotes/neosymbol/{exch}|{neo_symbol}/ohlc"
+    headers = {"Authorization": sess.get("access_token", ""), "Content-Type": "application/json"}
+    try:
+        r = await c.get(url, headers=headers)
+    except httpx.HTTPError as e:
+        return None, f"transport: {type(e).__name__}: {e}"
+    if r.status_code != 200:
+        return None, f"HTTP {r.status_code}"
+    data, err = safe_json(r)
+    if err:
+        return None, err
+    if isinstance(data, list) and data:
+        return data[0], None
+    if isinstance(data, dict):
+        return data.get("data", data) if isinstance(data.get("data"), dict) else data, None
+    return None, f"unexpected shape: {str(data)[:120]}"
+
+
+class OptionFullRequest(BaseModel):
+    session_id: str
+    legs:       list[dict]    # [{p_symbol, exchange?}, …]
+
+
+@app.post("/quotes/option_full")
+async def option_full(req: OptionFullRequest):
+    """Fetch full quote (LTP + OI + Volume + OHLC) for a list of option
+    legs in parallel. Used by the Technicals card to show ATM CE/PE
+    OI + Volume + PCR. Returns {"legs":[{p_symbol, ok, ltp, oi, vol,
+    open, high, low, error}, …]}."""
+    sess = get_session(req.session_id)
+    async with httpx.AsyncClient(timeout=12) as c:
+        results = await asyncio.gather(*[
+            _ohlc_via_script_details(c, sess, leg.get("p_symbol",""), leg.get("exchange","nse_fo"))
+            for leg in req.legs
+        ], return_exceptions=True)
+    out = []
+    for leg, res in zip(req.legs, results):
+        entry = {"p_symbol": leg.get("p_symbol",""), "ok": False}
+        if isinstance(res, Exception):
+            entry["error"] = f"{type(res).__name__}: {res}"
+            out.append(entry); continue
+        item, err = res
+        if err or not isinstance(item, dict):
+            entry["error"] = err or "no data"
+            out.append(entry); continue
+        # Field-alias lookup — Kotak ships these under slightly different
+        # key names depending on the segment. Lower-case match for safety.
+        ci = {k.lower(): k for k in item.keys()}
+        def pick(*keys):
+            for k in keys:
+                rk = ci.get(k.lower())
+                if rk and item.get(rk) not in (None, "", "0"):
+                    return item[rk]
+            return None
+        try:
+            entry.update({
+                "ok":    True,
+                "ltp":   float(pick("ltp","lastTradedPrice","last_price") or 0),
+                "oi":    int(float(pick("oi","openInterest","openInt","open_interest") or 0)),
+                "vol":   int(float(pick("vol","volume","totalTradedQty","ttv","total_volume") or 0)),
+                "open":  float(pick("op","open","openPrice") or 0),
+                "high":  float(pick("hp","high","highPrice","dayHigh") or 0),
+                "low":   float(pick("lp","low","lowPrice","dayLow") or 0),
+            })
+        except (TypeError, ValueError) as e:
+            entry["error"] = f"parse: {e}"
+        out.append(entry)
+    return {"legs": out}
+
+
 @app.post("/quotes/option_ltp")
 async def option_ltp(req: OptionLtpRequest):
     """LTP for a single option contract. Used by startMon() to poll real
