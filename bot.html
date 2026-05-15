@@ -222,7 +222,7 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
     <div class="sub">KOTAK NEO OPTIONS</div>
   </div>
   <div style="text-align:right">
-    <div id="spotEl" style="font-size:13px;font-weight:700;color:var(--green)">NIFTY 24350.00</div>
+    <div id="spotEl" style="font-size:13px;font-weight:700;color:var(--dim)">NIFTY —</div>
     <div style="display:flex;align-items:center;gap:8px;font-size:10px;justify-content:flex-end;margin-top:3px">
       <span><span class="dot off" id="sDot"></span><span id="sLbl">SERVER</span></span>
       <span><span class="dot off" id="aDot"></span><span id="aLbl">AUTH</span></span>
@@ -551,7 +551,8 @@ const CLAUDE = "https://api.anthropic.com/v1/messages";
 // returns the authoritative lot per leg — these are header-display only.
 const LS = {NIFTY:75, SENSEX:20};
 const G = {
-  sid:null, spot:{NIFTY:24350, SENSEX:80000},
+  sid:null, spot:{NIFTY:0, SENSEX:0},  // 0 until first real Kotak tick
+  _simSpot:{NIFTY:24350, SENSEX:80000}, // simulator-only baseline (no-session demo)
   inst:"NIFTY", lots:1, chain:[], selRow:null, sig:null,
   botOn:false, botIv:null, open:[], done:[], pnl:0, logN:0, wallet:null,
   orderAuthVerified:false,
@@ -646,7 +647,7 @@ async function fetchLiveMarketData(){
       buildChain();
       quickLean();                                      // sub-cycle direction refresh (no LLM call)
       pushTickToChart(res.ltp, Date.now());             // feed live tick → chart
-      updateSymbolHeader(res.ltp, chng, res.open || 0); // big header price + green/red chip
+      updateSymbolHeader(res.ltp, chng, res.prev_close || res.open || 0); // ref = Kotak prev close (matches Neo app)
       updateSnapshot();                                 // today's high/low slider
       paintMiCard(G.inst, res.ltp, chng);               // active market card
       fetchOtherIndex();                                // keep the OTHER card live too
@@ -735,8 +736,13 @@ function startLiveFeed(){
     // Simulated fallback when not authenticated — only the two
     // benchmarks the bot trades. Tick = small random drift around last.
     G.liveDataInterval = setInterval(()=>{
-      G.spot.NIFTY  = +(G.spot.NIFTY  + (Math.random()-.49)*8 ).toFixed(2);
-      G.spot.SENSEX = +(G.spot.SENSEX + (Math.random()-.49)*25).toFixed(2);
+      // Drift the simulator's own baseline; G.spot stays 0 until a real
+      // Kotak session is established so we don't confuse the chart with
+      // a fake-baseline drop on the first real tick.
+      G._simSpot.NIFTY  = +(G._simSpot.NIFTY  + (Math.random()-.49)*8 ).toFixed(2);
+      G._simSpot.SENSEX = +(G._simSpot.SENSEX + (Math.random()-.49)*25).toFixed(2);
+      G.spot.NIFTY  = G._simSpot.NIFTY;
+      G.spot.SENSEX = G._simSpot.SENSEX;
       const s=G.spot[G.inst];
       const el=document.getElementById('spotEl');
       el.textContent=G.inst+' '+s.toFixed(2)+' (SIMULATED)';
@@ -1138,10 +1144,12 @@ function mountChart(){
     if(bars.length) G.tvSeries.setData(bars);
   }
   G.tvLastInst = G.inst;
-  // Seed a starter point so the chart is never blank for the first tick.
-  if(!bars.length && G.spot[G.inst] > 0){
-    pushTickToChart(G.spot[G.inst], Date.now());
-  }
+  // Intentionally NOT seeding the chart from G.spot. The previous behaviour
+  // pushed a synthetic point at whatever spot we currently held — which is
+  // the placeholder default (0 / 24350 / 80000) before any real Kotak
+  // tick has arrived. The first real tick would then draw a giant bar
+  // from the placeholder to the live price (the "fake red drop" in the
+  // user's screenshot). Chart now stays blank until the first real tick.
   // Responsive resize.
   if(G._tvRO) G._tvRO.disconnect();
   G._tvRO = new ResizeObserver(()=>{
@@ -1271,14 +1279,24 @@ function selectIndex(name){
   updateSnapshot();
 }
 
-// Fill the symbol header + green/red change chip. Called every quote tick.
-function updateSymbolHeader(ltp, chgPct, open){
+// Fill the symbol header + green/red change chip. Called every quote
+// tick. `ref` is Kotak's reference (prev_close preferred, else session
+// open) — absolute delta is computed against that, not against the
+// first tick we saw on this page. If we don't have a real tick yet
+// (ltp <= 0), render "—" instead of fake ₹0.00.
+function updateSymbolHeader(ltp, chgPct, ref){
   const px = document.getElementById('symPx');
   const ch = document.getElementById('symCh');
   const rt = document.getElementById('symRet');
-  if(px) px.textContent = '₹' + Number(ltp || 0).toFixed(2);
+  if(!ltp || ltp <= 0){
+    if(px) px.textContent = '—';
+    if(ch){ ch.textContent = '—'; ch.classList.remove('up','dn'); }
+    if(rt){ rt.textContent = '—'; rt.style.color = 'var(--dim)'; }
+    return;
+  }
+  if(px) px.textContent = '₹' + Number(ltp).toFixed(2);
   const up = chgPct >= 0;
-  const absDelta = open ? (ltp - open) : 0;
+  const absDelta = ref ? (ltp - ref) : 0;
   if(ch){
     ch.textContent = (up?'▲ ':'▼ ') + (absDelta>=0?'+':'') + absDelta.toFixed(2) + '  (' + (up?'+':'') + chgPct.toFixed(2) + '%)';
     ch.classList.toggle('up',  up);
