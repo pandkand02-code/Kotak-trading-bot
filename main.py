@@ -634,6 +634,13 @@ async def get_market_data(req: QuoteRequest):
         ltp_inst, err_inst = await _ltp_via_script_details(c, sess, inst["neo_symbol"], inst["exchange_segment"])
         ohlc_raw, ohlc_err = await _ohlc_via_script_details(c, sess, inst["neo_symbol"], inst["exchange_segment"])
         ltp_vix,  err_vix  = await _ltp_via_script_details(c, sess, vix["neo_symbol"],  vix["exchange_segment"])
+        # Belt-and-braces: also call /quick/quotes for OHLC. The
+        # script-details/ohlc path doesn't exist on every account variant
+        # (it returned blank for the user, sending the bot back to the
+        # recorder's first-tick = +0.00% bug). /quick/quotes with
+        # quote_type=ohlc DOES work for indices — same path /quotes/ohlc
+        # already uses successfully.
+        qq_raw, qq_err = await _ohlc_via_quick_quotes(c, sess, inst)
 
     def _pick(item, *keys):
         """Kotak ships open/high/low/prev-close under several aliases
@@ -651,10 +658,25 @@ async def get_market_data(req: QuoteRequest):
                     continue
         return None
 
-    real_open  = _pick(ohlc_raw, "op", "open", "openPrice", "open_price")
-    real_high  = _pick(ohlc_raw, "hp", "high", "highPrice", "dayHigh", "high_price")
-    real_low   = _pick(ohlc_raw, "lp", "low",  "lowPrice",  "dayLow",  "low_price")
-    prev_close = _pick(ohlc_raw, "c",  "close", "prevClose", "previousClose", "prev_close", "yc")
+    # Try /quick/quotes (qq_raw) first, then /script-details/ohlc, then None.
+    # We pick from whichever source actually populated a field.
+    def _from_any(*keys):
+        for src in (qq_raw, ohlc_raw):
+            v = _pick(src, *keys)
+            if v is not None:
+                return v
+        return None
+    real_open  = _from_any("o", "op", "open", "openPrice", "open_price")
+    real_high  = _from_any("h", "hp", "high", "highPrice", "dayHigh", "high_price")
+    real_low   = _from_any("l", "lp", "low",  "lowPrice",  "dayLow",  "low_price")
+    prev_close = _from_any("c",  "close", "prevClose", "previousClose", "prev_close",
+                           "previous_close", "closePrice", "yc", "ycp")
+    logger.info(
+        f"market_data ohlc: inst={req.instrument} ltp={ltp_inst} "
+        f"open={real_open} high={real_high} low={real_low} prev_close={prev_close} "
+        f"qq_keys={list(qq_raw.keys())[:10] if isinstance(qq_raw, dict) else None} "
+        f"sd_keys={list(ohlc_raw.keys())[:10] if isinstance(ohlc_raw, dict) else None}"
+    )
 
     if ltp_inst is not None and ltp_inst > 0:
         # Record the tick so momentum_5m still works. We deliberately do
@@ -720,6 +742,38 @@ class OptionLtpRequest(BaseModel):
     session_id: str
     p_symbol:   str      # neosymbol form, e.g. "NIFTY25MAY24500CE"
     exchange:   str = "nse_fo"
+
+
+# OHLC for an index/equity via Kotak's /quick/quotes POST. This is the
+# working path on every account variant we've tested — same one
+# /quotes/ohlc uses. Returns the first item dict from response.data
+# (Kotak ships {stat, data:[{...}]}) and parses to dict for the alias
+# picker in /quotes/market_data. prev_close on this response is the
+# previous-day close which is what the Neo app uses as the day-change
+# reference.
+async def _ohlc_via_quick_quotes(c: httpx.AsyncClient, sess: dict, inst_token_dict: dict):
+    base = sess["base_url"].rstrip("/")
+    url  = f"{base}/quick/quotes"
+    headers = {
+        "Auth":         sess["session_token"],
+        "Sid":          sess["session_sid"],
+        "neo-fin-key":  NEO_FIN_KEY,
+        "Content-Type": "application/json",
+    }
+    payload = {"instrument_tokens": [inst_token_dict], "quote_type": "ohlc", "isIndex": True}
+    try:
+        r = await c.post(url, headers=headers, json=payload)
+    except httpx.HTTPError as e:
+        return None, f"transport: {type(e).__name__}: {e}"
+    data, err = safe_json(r)
+    if err:
+        return None, err
+    items = data.get("data") if isinstance(data, dict) else data
+    if isinstance(items, list) and items and isinstance(items[0], dict):
+        return items[0], None
+    if isinstance(data, dict):
+        return data, None
+    return None, f"unexpected shape: {str(data)[:200]}"
 
 
 # Full quote helper — same auth + base URL as _ltp_via_script_details, just

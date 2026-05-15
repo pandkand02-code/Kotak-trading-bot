@@ -730,6 +730,12 @@ function startLiveFeed(){
   if(G.liveDataInterval) clearInterval(G.liveDataInterval);
   if(G.sid){
     log('Starting REAL Kotak live data feed...','success');
+    // Drop any chart bars accumulated under simulator-mode so the real
+    // feed starts from a clean slate. (Belt-and-braces — we also stopped
+    // pushing sim ticks into the chart, but if an older session left
+    // sim bars in G.chartBars, wipe them here.)
+    G.chartBars = {};
+    if(G.tvSeries){ try{ G.tvSeries.setData([]); }catch(_){} }
     fetchLiveMarketData(); // immediate first call
     G.liveDataInterval = setInterval(fetchLiveMarketData, 5000); // every 5 seconds
   } else {
@@ -738,7 +744,11 @@ function startLiveFeed(){
     G.liveDataInterval = setInterval(()=>{
       // Drift the simulator's own baseline; G.spot stays 0 until a real
       // Kotak session is established so we don't confuse the chart with
-      // a fake-baseline drop on the first real tick.
+      // a fake-baseline drop on the first real tick. CRITICALLY: we do
+      // NOT push simulator ticks into the chart — earlier behavior was
+      // building a fake bar at ~24350 (simulator's last value) so when
+      // the first real tick arrived (~23721) the chart drew a huge fake
+      // drop. Chart stays empty until the first real Kotak tick.
       G._simSpot.NIFTY  = +(G._simSpot.NIFTY  + (Math.random()-.49)*8 ).toFixed(2);
       G._simSpot.SENSEX = +(G._simSpot.SENSEX + (Math.random()-.49)*25).toFixed(2);
       G.spot.NIFTY  = G._simSpot.NIFTY;
@@ -748,7 +758,6 @@ function startLiveFeed(){
       el.textContent=G.inst+' '+s.toFixed(2)+' (SIMULATED)';
       el.style.color='var(--gold)';
       buildChain();
-      pushTickToChart(s, Date.now());
     },3000);
   }
 }
