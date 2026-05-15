@@ -568,17 +568,17 @@ async def get_ohlc(req: QuoteRequest):
             raise HTTPException(status_code=500, detail=str(e))
 
 # ── LIVE MARKET DATA (LTP + VIX via /script-details/1.0/quotes/neosymbol) ───
-async def _ltp_via_script_details(c: httpx.AsyncClient, sess: dict, neo_symbol: str, exch: str):
-    """Hit Kotak's /script-details/1.0/quotes/neosymbol/{exch}|{symbol}/ltp.
+async def _get_quote_item(c: httpx.AsyncClient, sess: dict, neo_symbol: str, exch: str):
+    """Fetch the full Kotak quote item dict via /script-details/1.0/quotes/
+    neosymbol/{exch}|{symbol}/ltp. Returns (item_dict_or_None, error_str).
 
-    This is the REST quote path that actually works on NEO accounts (the
-    /quotes and /quick/quotes paths return 503). Auth uses the user's static
-    access_token, NOT the post-login session_token — that's the trick.
-
-    Returns (ltp_float|None, error_str|None).
+    The endpoint returns more than just LTP — change %, prev close, OHLC,
+    volume, OI are all in the same response item under various aliases
+    (Kotak's field names differ by segment and account variant). Callers
+    that need more than the price should call this directly and use a
+    case-insensitive alias picker on the returned dict.
     """
     base = sess["base_url"].rstrip("/")
-    # neosymbol is "{exch}|{name}" e.g. "nse_cm|Nifty 50"
     url = f"{base}/script-details/1.0/quotes/neosymbol/{exch}|{neo_symbol}/ltp"
     headers = {
         "Authorization": sess.get("access_token", ""),
@@ -591,7 +591,6 @@ async def _ltp_via_script_details(c: httpx.AsyncClient, sess: dict, neo_symbol: 
     data, err = safe_json(r)
     if err:
         return None, err
-    # Response shape: [{"ltp": "24351.18", ...}]  (sometimes a single dict)
     if isinstance(data, list) and data:
         item = data[0]
     elif isinstance(data, dict) and ("ltp" in data or "data" in data):
@@ -602,6 +601,14 @@ async def _ltp_via_script_details(c: httpx.AsyncClient, sess: dict, neo_symbol: 
         return None, f"unexpected shape: {str(data)[:200]}"
     if not isinstance(item, dict):
         return None, f"unexpected item shape: {str(item)[:200]}"
+    return item, None
+
+
+async def _ltp_via_script_details(c: httpx.AsyncClient, sess: dict, neo_symbol: str, exch: str):
+    """Thin wrapper over _get_quote_item — returns (ltp_float|None, error)."""
+    item, err = await _get_quote_item(c, sess, neo_symbol, exch)
+    if err or not item:
+        return None, err
     try:
         return float(item.get("ltp") or 0), None
     except (TypeError, ValueError) as e:
@@ -624,23 +631,27 @@ async def get_market_data(req: QuoteRequest):
     sess = get_session(req.session_id)
 
     async with httpx.AsyncClient(timeout=15) as c:
-        # Pull LTP + OHLC in parallel for the underlying. The OHLC payload
-        # carries Kotak's authoritative session open / high / low / prev
-        # close — without it, change% would be (ltp - first_tick_we_saw)
-        # which is the change since the user logged in, not since 09:15
-        # NSE session open. That misleads the AI signal *and* breaks the
-        # day-change header (user reported NIFTY shown as +0.02% when
-        # Kotak Neo app showed +0.20%).
-        ltp_inst, err_inst = await _ltp_via_script_details(c, sess, inst["neo_symbol"], inst["exchange_segment"])
+        # Single source of truth: fetch the FULL Kotak quote item for the
+        # underlying. The /script-details/.../ltp response contains LTP,
+        # change %, prev close, OHLC etc. all in one dict — we just need
+        # to read them. (Previous bug: we were calling /ltp helper that
+        # returned only the price, then trying to fetch change separately
+        # via paths that didn't exist on this account; result was
+        # change=0.00%. This fixes it definitively.)
+        ltp_item, ltp_err = await _get_quote_item(c, sess, inst["neo_symbol"], inst["exchange_segment"])
         ohlc_raw, ohlc_err = await _ohlc_via_script_details(c, sess, inst["neo_symbol"], inst["exchange_segment"])
         ltp_vix,  err_vix  = await _ltp_via_script_details(c, sess, vix["neo_symbol"],  vix["exchange_segment"])
-        # Belt-and-braces: also call /quick/quotes for OHLC. The
-        # script-details/ohlc path doesn't exist on every account variant
-        # (it returned blank for the user, sending the bot back to the
-        # recorder's first-tick = +0.00% bug). /quick/quotes with
-        # quote_type=ohlc DOES work for indices — same path /quotes/ohlc
-        # already uses successfully.
+        # Belt-and-braces secondary OHLC source from /quick/quotes — same
+        # path /quotes/ohlc uses. Used as a fallback only.
         qq_raw, qq_err = await _ohlc_via_quick_quotes(c, sess, inst)
+
+    ltp_inst = None
+    if isinstance(ltp_item, dict):
+        try:
+            ltp_inst = float(ltp_item.get("ltp") or 0)
+        except (TypeError, ValueError):
+            ltp_inst = None
+    err_inst = ltp_err if not ltp_inst else None
 
     def _pick(item, *keys):
         """Kotak ships open/high/low/prev-close under several aliases
@@ -658,10 +669,14 @@ async def get_market_data(req: QuoteRequest):
                     continue
         return None
 
-    # Try /quick/quotes (qq_raw) first, then /script-details/ohlc, then None.
-    # We pick from whichever source actually populated a field.
+    # Pick fields from any of three Kotak sources in priority order:
+    #   1. ltp_item — the same /script-details/.../ltp response Kotak's
+    #      own app uses (change %, prev close, OHLC typically embedded here)
+    #   2. qq_raw   — /quick/quotes quote_type=ohlc
+    #   3. ohlc_raw — /script-details/.../ohlc (may not exist; harmless if it
+    #                 returned None)
     def _from_any(*keys):
-        for src in (qq_raw, ohlc_raw):
+        for src in (ltp_item, qq_raw, ohlc_raw):
             v = _pick(src, *keys)
             if v is not None:
                 return v
@@ -670,12 +685,24 @@ async def get_market_data(req: QuoteRequest):
     real_high  = _from_any("h", "hp", "high", "highPrice", "dayHigh", "high_price")
     real_low   = _from_any("l", "lp", "low",  "lowPrice",  "dayLow",  "low_price")
     prev_close = _from_any("c",  "close", "prevClose", "previousClose", "prev_close",
-                           "previous_close", "closePrice", "yc", "ycp")
+                           "previous_close", "closePrice", "yc", "ycp", "cls", "prevclose")
+    # Many Kotak account variants ship the change ready-computed under
+    # one of these keys. If we find it, use it directly — no need to
+    # compute (ltp - prev_close)/prev_close.
+    direct_change_pct = _from_any("ncp", "nc", "pc", "pchg", "perChange",
+                                  "percentChange", "pricePctChange",
+                                  "chgper", "chgPct", "chgPercent")
+    direct_change_abs = _from_any("chg", "ch", "cng", "change", "absoluteChange",
+                                  "priceChange", "ltpChange", "chgVal")
+    # Diagnostic log — line gets printed to Railway logs on every call.
+    # If the next user screenshot still shows +0.00%, this tells me the
+    # *exact* keys Kotak returned so I can add the missing alias in one
+    # targeted commit.
     logger.info(
         f"market_data ohlc: inst={req.instrument} ltp={ltp_inst} "
         f"open={real_open} high={real_high} low={real_low} prev_close={prev_close} "
-        f"qq_keys={list(qq_raw.keys())[:10] if isinstance(qq_raw, dict) else None} "
-        f"sd_keys={list(ohlc_raw.keys())[:10] if isinstance(ohlc_raw, dict) else None}"
+        f"direct_chg_pct={direct_change_pct} direct_chg_abs={direct_change_abs} "
+        f"ltp_keys={list(ltp_item.keys()) if isinstance(ltp_item, dict) else None}"
     )
 
     if ltp_inst is not None and ltp_inst > 0:
@@ -686,11 +713,22 @@ async def get_market_data(req: QuoteRequest):
         if ltp_vix and ltp_vix > 0:
             tick_recorder.record("VIX", ltp_vix)
 
-        # Day-change reference: prefer Kotak's previous close (matches
-        # the Neo app display), then today's open, then the recorder's
-        # fallback open as the last resort.
-        ref = prev_close or real_open or stats.get("open") or ltp_inst
-        change_pct = ((ltp_inst - ref) / ref * 100) if ref else 0.0
+        # Day-change priority:
+        #   1. Kotak's own direct change% if shipped in the response
+        #      (matches Neo app to the rounding)
+        #   2. Computed from prev_close                     (matches too)
+        #   3. Computed from session open                   (close enough)
+        #   4. Recorder's first-tick                        (last resort)
+        if direct_change_pct is not None:
+            change_pct = direct_change_pct
+        else:
+            ref = prev_close or real_open or stats.get("open") or ltp_inst
+            change_pct = ((ltp_inst - ref) / ref * 100) if ref else 0.0
+        # Absolute change: prefer Kotak's direct value, else compute.
+        if direct_change_abs is not None:
+            change_abs = direct_change_abs
+        else:
+            change_abs = (ltp_inst - prev_close) if prev_close else 0
         return {
             "success":     True,
             "instrument":  req.instrument,
@@ -702,10 +740,15 @@ async def get_market_data(req: QuoteRequest):
             "close":       prev_close or stats.get("open",  ltp_inst),
             "prev_close":  prev_close or 0,
             "change":      round(change_pct, 3),
+            "change_abs":  round(change_abs, 2),
             "momentum_5m": stats.get("momentum_5m", 0),
             "ticks_count": stats.get("ticks_count", 1),
-            "source":      "script-details/ohlc+ltp" if ohlc_raw else "script-details/ltp",
+            "source":      "script-details/ltp+ohlc" if (ltp_item or ohlc_raw) else "fallback",
             "ohlc_error":  ohlc_err,
+            # Raw Kotak fields exposed so TEST QUOTE in the LOG tab shows
+            # the actual field names. If change_pct still looks wrong, the
+            # frontend log line will reveal which alias to add.
+            "raw_ltp_item": ltp_item if isinstance(ltp_item, dict) else None,
         }
 
     # REST failed — fall back to the WebSocket streamer (kept around for this).
