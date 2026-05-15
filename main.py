@@ -631,18 +631,18 @@ async def get_market_data(req: QuoteRequest):
     sess = get_session(req.session_id)
 
     async with httpx.AsyncClient(timeout=15) as c:
-        # Single source of truth: fetch the FULL Kotak quote item for the
-        # underlying. The /script-details/.../ltp response contains LTP,
-        # change %, prev close, OHLC etc. all in one dict — we just need
-        # to read them. (Previous bug: we were calling /ltp helper that
-        # returned only the price, then trying to fetch change separately
-        # via paths that didn't exist on this account; result was
-        # change=0.00%. This fixes it definitively.)
+        # Kotak's /script-details/.../ltp response is verified to contain
+        # ONLY the LTP — no change, no prev_close, no OHLC. (We confirmed
+        # this by dumping the raw item dict on the user's account: it
+        # carries just exchange_token, display_symbol, exchange, ltp.)
+        # So we get the live price from Kotak and the day-change reference
+        # from Yahoo Finance's public chart endpoint, which returns
+        # prev_close + OHLC for ^NSEI / ^BSESN with no auth.
         ltp_item, ltp_err = await _get_quote_item(c, sess, inst["neo_symbol"], inst["exchange_segment"])
-        ohlc_raw, ohlc_err = await _ohlc_via_script_details(c, sess, inst["neo_symbol"], inst["exchange_segment"])
         ltp_vix,  err_vix  = await _ltp_via_script_details(c, sess, vix["neo_symbol"],  vix["exchange_segment"])
-        # Belt-and-braces secondary OHLC source from /quick/quotes — same
-        # path /quotes/ohlc uses. Used as a fallback only.
+        yahoo_data, yahoo_err = await _ohlc_via_yahoo(c, req.instrument)
+        # Kotak fallback OHLC paths — kept for diagnostics; rarely populated.
+        ohlc_raw, ohlc_err = await _ohlc_via_script_details(c, sess, inst["neo_symbol"], inst["exchange_segment"])
         qq_raw, qq_err = await _ohlc_via_quick_quotes(c, sess, inst)
 
     ltp_inst = None
@@ -669,14 +669,17 @@ async def get_market_data(req: QuoteRequest):
                     continue
         return None
 
-    # Pick fields from any of three Kotak sources in priority order:
-    #   1. ltp_item — the same /script-details/.../ltp response Kotak's
-    #      own app uses (change %, prev close, OHLC typically embedded here)
-    #   2. qq_raw   — /quick/quotes quote_type=ohlc
-    #   3. ohlc_raw — /script-details/.../ohlc (may not exist; harmless if it
-    #                 returned None)
+    # Pick fields from sources in priority order:
+    #   1. yahoo_data — public Yahoo Finance v8, populates open/high/low/
+    #                   prev_close for ^NSEI / ^BSESN reliably
+    #   2. ltp_item   — Kotak; carries ltp on every account variant, the
+    #                   richer fields are usually empty here but harmless
+    #                   to check
+    #   3. qq_raw     — Kotak /quick/quotes (rarely populated on the
+    #                   accounts we've inspected)
+    #   4. ohlc_raw   — Kotak /script-details/.../ohlc (often 404)
     def _from_any(*keys):
-        for src in (ltp_item, qq_raw, ohlc_raw):
+        for src in (yahoo_data, ltp_item, qq_raw, ohlc_raw):
             v = _pick(src, *keys)
             if v is not None:
                 return v
@@ -701,8 +704,7 @@ async def get_market_data(req: QuoteRequest):
     logger.info(
         f"market_data ohlc: inst={req.instrument} ltp={ltp_inst} "
         f"open={real_open} high={real_high} low={real_low} prev_close={prev_close} "
-        f"direct_chg_pct={direct_change_pct} direct_chg_abs={direct_change_abs} "
-        f"ltp_keys={list(ltp_item.keys()) if isinstance(ltp_item, dict) else None}"
+        f"yahoo_ok={bool(yahoo_data)} yahoo_err={yahoo_err}"
     )
 
     if ltp_inst is not None and ltp_inst > 0:
@@ -745,10 +747,12 @@ async def get_market_data(req: QuoteRequest):
             "ticks_count": stats.get("ticks_count", 1),
             "source":      "script-details/ltp+ohlc" if (ltp_item or ohlc_raw) else "fallback",
             "ohlc_error":  ohlc_err,
-            # Raw Kotak fields exposed so TEST QUOTE in the LOG tab shows
-            # the actual field names. If change_pct still looks wrong, the
-            # frontend log line will reveal which alias to add.
+            # Raw responses from every source for TEST QUOTE visibility.
             "raw_ltp_item": ltp_item if isinstance(ltp_item, dict) else None,
+            "raw_yahoo":    yahoo_data,
+            "yahoo_error":  yahoo_err,
+            "raw_qq":       qq_raw if isinstance(qq_raw, dict) else None,
+            "qq_error":     qq_err,
         }
 
     # REST failed — fall back to the WebSocket streamer (kept around for this).
@@ -794,6 +798,49 @@ class OptionLtpRequest(BaseModel):
 # picker in /quotes/market_data. prev_close on this response is the
 # previous-day close which is what the Neo app uses as the day-change
 # reference.
+# Yahoo Finance v8 chart endpoint — public, no auth, returns prev_close +
+# OHLC for indices. Used as the authoritative day-change reference
+# because Kotak's /script-details/.../ltp endpoint only ships LTP (we
+# confirmed by inspecting the raw response on the user's account — the
+# entire body is just {exchange_token, display_symbol, exchange, ltp}).
+_YAHOO_SYM = {
+    "NIFTY":  "^NSEI",
+    "SENSEX": "^BSESN",
+}
+_YAHOO_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+             "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
+
+async def _ohlc_via_yahoo(c: httpx.AsyncClient, instrument: str):
+    """Return {ltp, open, high, low, prev_close} for the index from Yahoo
+    Finance v8, or (None, error). Reads from `meta` block which Yahoo
+    populates with the live regular-market snapshot."""
+    sym = _YAHOO_SYM.get(instrument.upper())
+    if not sym:
+        return None, f"no yahoo symbol for {instrument}"
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=1d"
+    try:
+        r = await c.get(url, headers={"User-Agent": _YAHOO_UA, "Accept": "application/json"})
+    except httpx.HTTPError as e:
+        return None, f"transport: {type(e).__name__}: {e}"
+    if r.status_code != 200:
+        return None, f"HTTP {r.status_code}"
+    data, err = safe_json(r)
+    if err:
+        return None, err
+    try:
+        meta = data["chart"]["result"][0]["meta"]
+    except (KeyError, IndexError, TypeError) as e:
+        return None, f"unexpected shape: {type(e).__name__}"
+    return {
+        "ltp":        meta.get("regularMarketPrice"),
+        "open":       meta.get("regularMarketOpen") or meta.get("chartPreviousClose"),
+        "high":       meta.get("regularMarketDayHigh"),
+        "low":        meta.get("regularMarketDayLow"),
+        "prev_close": meta.get("regularMarketPreviousClose") or meta.get("chartPreviousClose"),
+    }, None
+
+
 async def _ohlc_via_quick_quotes(c: httpx.AsyncClient, sess: dict, inst_token_dict: dict):
     base = sess["base_url"].rstrip("/")
     url  = f"{base}/quick/quotes"
