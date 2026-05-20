@@ -1119,6 +1119,90 @@ async def news_sentiment(req: NewsSentimentRequest):
     return payload
 
 
+# ── TELEGRAM CHANNEL SENTIMENT (public preview scrape) ────────────────────
+# Public Telegram channels are readable via https://t.me/s/{username} — the
+# HTML page shows the ~20 most recent messages. We scrape that, strip HTML,
+# and score with the same bull/bear lexicon as /news/sentiment. Private
+# channels are not accessible this way; for those the user would need to
+# create a Telegram bot and add it to the channel (see /news/telegram_bot
+# — TODO once requested).
+_tg_cache: dict[str, tuple[float, dict]] = {}
+TG_TTL = 180  # 3 min cache; stock-news channels post frequently
+
+
+class TelegramNewsRequest(BaseModel):
+    channel: str   # username without @, e.g. "stocknews_india"
+
+
+@app.post("/news/telegram")
+async def news_telegram(req: TelegramNewsRequest):
+    channel = (req.channel or "").lstrip("@").strip()
+    if not channel:
+        return {"ok": False, "error": "channel name required"}
+
+    now = time.monotonic()
+    hit = _tg_cache.get(channel)
+    if hit and hit[0] > now:
+        return {**hit[1], "cached": True}
+
+    url = f"https://t.me/s/{channel}"
+    headers = {"User-Agent": _YAHOO_UA, "Accept": "text/html,*/*"}
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True, headers=headers) as c:
+            r = await c.get(url)
+    except httpx.HTTPError as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}", "channel": channel}
+    if r.status_code != 200:
+        return {"ok": False, "error": f"HTTP {r.status_code} (channel may be private or not exist)", "channel": channel}
+
+    # Pull <div class="tgme_widget_message_text ..."> contents. Telegram's
+    # preview HTML wraps every message body in this class.
+    raw_msgs = re.findall(
+        r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>',
+        r.text, re.DOTALL
+    )
+    if not raw_msgs:
+        return {
+            "ok":      False,
+            "channel": channel,
+            "error":   "no messages parsed (channel may be private, empty, or not exist)",
+            "html_size": len(r.text),
+        }
+
+    headlines: list[str] = []
+    for body in raw_msgs[-30:]:
+        # Strip HTML tags, collapse whitespace.
+        clean = re.sub(r"<br\s*/?>", " ", body, flags=re.I)
+        clean = re.sub(r"<[^>]+>", " ", clean)
+        clean = re.sub(r"&[a-z]+;", " ", clean)
+        clean = re.sub(r"\s+", " ", clean).strip()
+        if clean and len(clean) >= 10:
+            headlines.append(clean[:280])
+
+    score, matched = 0.0, 0
+    for h in headlines:
+        words = set(w.lower() for w in re.findall(r"[A-Za-z]+", h))
+        b = len(words & _BULL_WORDS)
+        s = len(words & _BEAR_WORDS)
+        if b or s:
+            matched += 1
+            score += (b - s) / max(b + s, 1)
+    sentiment = round(score / matched, 3) if matched else 0.0
+
+    payload = {
+        "ok":              True,
+        "channel":         channel,
+        "sentiment_score": sentiment,
+        "headlines":       headlines[-10:],   # most recent 10
+        "count":           len(headlines),
+        "matched":         matched,
+        "fetched_at":      int(time.time()),
+        "cached":          False,
+    }
+    _tg_cache[channel] = (now + TG_TTL, payload)
+    return payload
+
+
 @app.post("/quotes/stream_status")
 async def stream_status(req: SessionRequest):
     """Inspect the WebSocket streamer for a session — connection state,
