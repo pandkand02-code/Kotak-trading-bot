@@ -389,6 +389,16 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
           </select>
         </div>
         <div class="irow" style="margin-top:10px">
+          <span class="ilbl">Telegram News (public channel @name)</span>
+        </div>
+        <input id="tgChan" placeholder="e.g. stocknews_india" onchange="setTgChannel()" style="margin-top:4px">
+        <div style="font-size:10px;color:var(--dim);margin-top:-4px;margin-bottom:6px">
+          Paste a public channel username. The bot scrapes the last ~20
+          messages every 3 min and merges sentiment into the AI decision.
+          Private channels won't work via this path — ask me for the
+          bot-token route if your channel is private.
+        </div>
+        <div class="irow" style="margin-top:10px">
           <span class="ilbl">Lots (<span id="lsLbl">75</span>/lot)</span>
           <div class="lots-c">
             <button class="lots-btn" onclick="chgLots(-1)">−</button>
@@ -2114,15 +2124,72 @@ async function dispatchAutoTrade(){
   placeOrder(dir, ar);
 }
 
-// ── NEWS FETCH (server-side; cached 5 min) ────────────────────────────────
+// ── NEWS FETCH (broad sentiment + optional Telegram channel) ──────────────
+// Two sources merged into G.news:
+//   1. /news/sentiment — Google/Bing news RSS (general market mood)
+//   2. /news/telegram  — the public Telegram channel the user follows,
+//                        if any. Channel username persists in localStorage.
+// Combined sentiment_score is a vote-weighted average so a busy channel
+// can pull more weight on a slow news day, and vice versa.
 async function fetchNews(){
+  let baseScore = 0, baseMatched = 0;
   try{
     const r = await api('/news/sentiment', {instrument: G.inst});
     G.news = r;
+    baseScore = r.sentiment_score || 0;
+    baseMatched = r.matched || 0;
     log('News '+(r.cached?'(cache)':'(fresh)')+' — sentiment '+r.sentiment_score+' across '+r.count+' headlines'+(r.error?(' err:'+r.error):''),'info');
   }catch(e){
     log('News fetch error: '+e.message,'warn');
   }
+  if(G.tgChannel){
+    try{
+      const tg = await api('/news/telegram', {channel: G.tgChannel});
+      if(tg.ok){
+        G.tgNews = tg;
+        log('Telegram @'+tg.channel+' '+(tg.cached?'(cache)':'(fresh)')+' — sentiment '+tg.sentiment_score+' across '+tg.count+' msgs (matched '+tg.matched+')','success');
+        // Vote-weighted merge so a quiet channel doesn't dilute the broader
+        // news and a noisy channel doesn't overwhelm it.
+        const w1 = Math.max(1, baseMatched);
+        const w2 = Math.max(1, tg.matched || 0);
+        const merged = (baseScore * w1 + (tg.sentiment_score||0) * w2) / (w1 + w2);
+        if(G.news){
+          G.news = {
+            ...G.news,
+            sentiment_score: round(merged, 3),
+            telegram_score:  tg.sentiment_score,
+            telegram_count:  tg.count,
+            telegram_channel: tg.channel,
+            headlines: [...(G.news.headlines || []), ...(tg.headlines || []).map(h => '[TG] '+h)].slice(-12),
+          };
+        } else {
+          G.news = {sentiment_score: tg.sentiment_score, headlines: tg.headlines, count: tg.count, matched: tg.matched, _tg_only: true};
+        }
+      } else {
+        log('Telegram @'+G.tgChannel+' failed: '+(tg.error||'?'),'warn');
+      }
+    }catch(e){
+      log('Telegram fetch error: '+e.message,'warn');
+    }
+  }
+}
+
+function round(n, d){ const f = Math.pow(10, d); return Math.round(n*f)/f; }
+
+// Save the Telegram channel username (persisted in localStorage).
+G.tgChannel = '';
+try { G.tgChannel = localStorage.getItem('nexus_tg_channel') || ''; } catch(_) {}
+function setTgChannel(){
+  const el = document.getElementById('tgChan');
+  if(!el) return;
+  const v = el.value.replace(/^@/, '').trim();
+  G.tgChannel = v;
+  try {
+    if(v) localStorage.setItem('nexus_tg_channel', v);
+    else  localStorage.removeItem('nexus_tg_channel');
+  } catch(_){}
+  log('Telegram channel: '+(v ? '@'+v : 'cleared'),'info');
+  if(v && G.sid) fetchNews();
 }
 
 async function cycle(){
@@ -2210,6 +2277,16 @@ log('NEXUS Bot v3 ready — Real Kotak API connected.','info');
 log('Tap WALLET → authenticate → real NIFTY price feeds automatically.','info');
 log('Position monitor: REAL Kotak LTP polling every '+ (typeof MON_POLL_MS!=='undefined'?MON_POLL_MS:3000) +' ms. Exits place a real SELL @ MKT.','info');
 restoreSession();   // try to skip the login screen entirely
+// Hydrate Telegram channel input from localStorage so the user does not
+// have to re-paste it on every page load.
+try {
+  const tg = localStorage.getItem('nexus_tg_channel') || '';
+  if(tg){
+    const el = document.getElementById('tgChan');
+    if(el) el.value = tg;
+    G.tgChannel = tg;
+  }
+} catch(_) {}
 </script>
 </body>
 </html>
