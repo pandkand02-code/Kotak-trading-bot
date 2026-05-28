@@ -999,6 +999,56 @@ function marketStatus(){
   return {open: true, reason: 'NSE live session'};
 }
 
+// IST clock helpers used by the spec-mandated timing gates below.
+function _istMins(){
+  const ist = new Date(Date.now() + 5.5 * 3600 * 1000);
+  return ist.getUTCHours()*60 + ist.getUTCMinutes();
+}
+function _istDOW(){
+  const ist = new Date(Date.now() + 5.5 * 3600 * 1000);
+  return ist.getUTCDay(); // 0=Sun ... 2=Tue ... 5=Fri
+}
+function _istDateStr(){
+  const ist = new Date(Date.now() + 5.5 * 3600 * 1000);
+  return ist.toISOString().slice(0, 10);
+}
+
+// Spec timing rules:
+//   - no entries 09:15..09:30  (skip opening volatility)
+//   - no entries after 14:40   (intraday only, avoid close)
+//   - no entries on expiry days:
+//        NIFTY weekly  = Tuesday   (NSE current convention; may shift —
+//                                   override via G.expiryOverride if NSE
+//                                   moves it again)
+//        SENSEX weekly = Friday    (BSE current convention)
+//   - hard auto-exit of all open positions at 15:20 IST
+const ENTRY_OPEN_MIN  = 9*60 + 30;   // 09:30
+const ENTRY_CLOSE_MIN = 14*60 + 40;  // 14:40
+const AUTO_EXIT_MIN   = 15*60 + 20;  // 15:20
+
+function _isExpiryDay(){
+  const dow = _istDOW();
+  // NIFTY weekly = Tuesday (2); SENSEX weekly = Friday (5).
+  if(G.inst === 'NIFTY'  && dow === 2) return true;
+  if(G.inst === 'SENSEX' && dow === 5) return true;
+  return false;
+}
+
+// Returns {ok:true} or {ok:false, reason}. The single source of truth used
+// by dispatchAutoTrade — never short-circuited or bypassed.
+function entryWindowAllowed(){
+  const mkt = marketStatus();
+  if(!mkt.open) return {ok:false, reason: mkt.reason};
+  const mins = _istMins();
+  if(mins < ENTRY_OPEN_MIN)
+    return {ok:false, reason: `pre-09:30 opening volatility window (${Math.floor(mins/60)}:${String(mins%60).padStart(2,'0')} IST)`};
+  if(mins >= ENTRY_CLOSE_MIN)
+    return {ok:false, reason: `after 14:40 cut-off — no fresh intraday entries`};
+  if(_isExpiryDay())
+    return {ok:false, reason: `${G.inst} expiry day — gamma/decay risk too high, trading disabled`};
+  return {ok:true};
+}
+
 // Real option chain. Pulls strikes + per-leg LTP + the real Kotak
 // p_trd_symbol / p_symbol from /chain/atm and renders them. Cached for
 // G.chainTtlMs because /chain/atm makes ~22 Kotak calls per build (one
@@ -1621,7 +1671,12 @@ async function placeOrder(side,rowOvr){
     pSymbol,             // for /quotes/option_ltp polling
     exchSeg,             // for the matching SELL on exit (nse_fo / bse_fo)
     entryOrdNo: liveOrdNo,
-    isPaper: !liveOrdNo  // paper trades fall back to simulated drift
+    isPaper: !liveOrdNo, // paper trades fall back to simulated drift
+    // Trailing stop-loss state:
+    initialSL:   sl,
+    initialTP:   tp,
+    maxLTP:      ltp,    // running peak — used to ratchet the trailing SL
+    trailStage:  0       // 0=none, 1=moved-to-cost (after 1:1 RR), 2=trailing
   };
   G.open.push(trade); G.selRow=null;
   document.getElementById('orderBox').style.display='none';
@@ -1679,6 +1734,43 @@ function startMon(trade){
 
     t.pnl=(t.currentLTP-t.entryPrice)*t.qty;
     t.pnlPct=((t.currentLTP-t.entryPrice)/t.entryPrice)*100;
+
+    // ── TRAILING STOP LOSS ────────────────────────────────────────────
+    // Two-stage trail per spec:
+    //   stage 1: at 1:1 RR (profit ≥ initial risk) → move SL to entry (cost).
+    //            "Free trade" — worst case is break-even.
+    //   stage 2: beyond 1:1 → trail SL at max(running peak − 1× initial risk,
+    //            current SL). Locks in profit as price advances; never moves
+    //            backward (one-way ratchet).
+    // We track the running peak (t.maxLTP) so a wick high is captured even
+    // if it doesn't last to the next tick.
+    if(t.currentLTP > t.maxLTP) t.maxLTP = t.currentLTP;
+    const initialRisk  = t.entryPrice - t.initialSL;   // CE long: positive
+    const profitVsRisk = t.currentLTP - t.entryPrice;
+    if(initialRisk > 0){
+      if(t.trailStage === 0 && profitVsRisk >= initialRisk){
+        // 1:1 RR reached → SL to cost.
+        t.sl = t.entryPrice;
+        t.trailStage = 1;
+        log('⤴ Trailing SL → cost (1:1 RR) on '+t.symbol+' @ ₹'+t.entryPrice.toFixed(2),'info');
+      } else if(t.trailStage >= 1){
+        // Trail at peak − initialRisk; only ratchet up, never down.
+        const candidate = t.maxLTP - initialRisk;
+        if(candidate > t.sl){
+          t.sl = +candidate.toFixed(2);
+          if(t.trailStage === 1) t.trailStage = 2;
+        }
+      }
+    }
+
+    // ── HARD AUTO-EXIT BEFORE MARKET CLOSE (spec: no overnight) ──────
+    // 15:20 IST cutoff. If we're past it, exit at market price right now.
+    if(_istMins() >= AUTO_EXIT_MIN){
+      clearInterval(mon[trade.id]);
+      log('🕒 AUTO-EXIT 15:20 cutoff hit on '+t.symbol+' — closing now','warn');
+      exitT(t, t.currentLTP >= t.entryPrice ? 'WIN' : 'LOSS', t.currentLTP);
+      return;
+    }
     if(t.currentLTP>=t.tp){clearInterval(mon[trade.id]);exitT(t,'WIN',t.currentLTP);return;}
     if(t.currentLTP<=t.sl){clearInterval(mon[trade.id]);exitT(t,'LOSS',t.currentLTP);return;}
     render();
@@ -1841,11 +1933,21 @@ function quickLean(forceRender){
     sr.textContent =
       `Local lean: chg ${chg.toFixed(3)}% · mom ${mom.toFixed(3)}% · ` +
       `${spot >= mid ? 'above':'below'} mid · VIX ${vix.toFixed(2)} · news ${news.toFixed(2)} ` +
-      `→ score ${score.toFixed(2)}`;
+      `→ score ${score.toFixed(2)} · bias ${_biasBucket(score)}`;
   }
   // Keep G.sig fresh for the auto-trade dispatcher. Mark this read as
   // "from local lean" so the next Claude analyze can overwrite cleanly.
-  G.sig = {direction: dir, confidence: conf, _fromQuickLean: true, _ts: Date.now()};
+  G.sig = {direction: dir, confidence: conf, score, bias: _biasBucket(score), _fromQuickLean: true, _ts: Date.now()};
+}
+
+// 5-bucket bias bucket from the unified [-1..+1] score. Used by quickLean,
+// dispatchAutoTrade (the NEUTRAL bucket auto-skips trades), and the UI badge.
+function _biasBucket(score){
+  if(score >=  0.55) return 'STRONG_BULLISH';
+  if(score >=  0.20) return 'BULLISH';
+  if(score <= -0.55) return 'STRONG_BEARISH';
+  if(score <= -0.20) return 'BEARISH';
+  return 'NEUTRAL';
 }
 
 // ── AI ANALYZE ────────────────────────────────────────────────────────────
@@ -1943,6 +2045,13 @@ Direction:
 - score > 0  -> CE
 - score < 0  -> PE
 - score == 0 (extremely rare) -> pick CE if news_sentiment >= 0 else PE.
+
+Five-bucket BIAS (return in `bias` field alongside `direction`):
+  score >=  0.55  -> "STRONG_BULLISH"  (high-conviction CE only)
+  score in 0.20..0.55 -> "BULLISH"
+  score in -0.20..0.20 -> "NEUTRAL"     (the auto-trader will skip)
+  score in -0.55..-0.20 -> "BEARISH"
+  score <= -0.55  -> "STRONG_BEARISH"   (high-conviction PE only)
 
 Confidence (50..95):
 - base = 50 + round(|score| * 45)
@@ -2083,6 +2192,18 @@ async function dispatchAutoTrade(){
   const conf = G.sig.confidence;
   if(dir === 'WAIT'){ return; }
 
+  // 0a. Spec timing gates — no entries 09:15-09:30, after 14:40, or on
+  //     expiry days. Single source of truth via entryWindowAllowed().
+  const win = entryWindowAllowed();
+  if(!win.ok){
+    log('Auto-trade SKIP — '+win.reason,'warn'); return;
+  }
+  // 0b. NEUTRAL bias bucket → no trades. Spec: only act on strong-bullish
+  //     (CE) or strong-bearish (PE). Bullish/Bearish at lower conviction
+  //     still trade but get caught by the confidence floor below.
+  if(G.sig.bias === 'NEUTRAL'){
+    log('Auto-trade SKIP — bias NEUTRAL (|score| < 0.20)','info'); return;
+  }
   // 1. Confidence floor.
   if(conf < G.minConfidence){
     log('Auto-trade SKIP — confidence '+conf+' < '+G.minConfidence,'info'); return;
