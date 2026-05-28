@@ -15,7 +15,7 @@ ensure_day_rolled()).
 """
 
 from __future__ import annotations
-import logging
+import logging, time
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -30,6 +30,10 @@ class RiskConfig:
     per_trade_tp_pct:  float = 3.0   # default take profit
     per_trade_sl_pct:  float = 2.0   # default stop loss
     capital_per_trade_pct: float = 15.0  # max % of wallet to deploy per trade
+    # Spec-mandated trade-frequency limits.
+    max_trades_per_day:      int = 10   # hard ceiling
+    consec_loss_pause_count: int = 3    # pause trading after this many losses in a row
+    consec_loss_pause_min:   int = 30   # auto-resume after this many minutes
 
 
 @dataclass
@@ -41,6 +45,9 @@ class RiskState:
     trades_today:    int = 0
     wins_today:      int = 0
     losses_today:    int = 0
+    consec_losses:   int = 0       # current streak; resets on any win
+    pause_until_ts:  float = 0.0   # epoch-seconds; if > now, entries blocked (cooldown)
+    pause_reason:    str = ""
     halted:          bool = False  # True when a cap fires
     halted_reason:   str = ""
     config: RiskConfig = field(default_factory=RiskConfig)
@@ -94,8 +101,18 @@ class RiskEngine:
         self.s.trades_today += 1
         if pnl > 0:
             self.s.wins_today += 1
+            self.s.consec_losses = 0  # any win resets the streak
         elif pnl < 0:
             self.s.losses_today += 1
+            self.s.consec_losses += 1
+            cfg = self.s.config
+            if self.s.consec_losses >= cfg.consec_loss_pause_count:
+                self.s.pause_until_ts = time.time() + cfg.consec_loss_pause_min * 60
+                self.s.pause_reason = (
+                    f"{self.s.consec_losses} losses in a row — "
+                    f"pause {cfg.consec_loss_pause_min}m to reassess"
+                )
+                logger.warning(f"[risk] consec-loss pause: {self.s.pause_reason}")
         self._evaluate_caps()
 
     def _evaluate_caps(self) -> None:
@@ -128,6 +145,23 @@ class RiskEngine:
             return False, self.s.halted_reason
         if self.s.wallet <= 0:
             return False, f"wallet is ₹{self.s.wallet:.2f} — cannot place new trades"
+        # Max-trades-per-day ceiling (spec: 10).
+        cfg = self.s.config
+        if self.s.trades_today >= cfg.max_trades_per_day:
+            return False, (
+                f"daily trade cap hit ({self.s.trades_today}/"
+                f"{cfg.max_trades_per_day}) — pausing till midnight"
+            )
+        # Consecutive-loss pause window. Auto-clears when ts passes.
+        now = time.time()
+        if self.s.pause_until_ts and now < self.s.pause_until_ts:
+            remain = int(self.s.pause_until_ts - now)
+            return False, f"{self.s.pause_reason} ({remain}s left)"
+        if self.s.pause_until_ts and now >= self.s.pause_until_ts:
+            # Pause expired — clear it and let the trader try again.
+            self.s.pause_until_ts = 0.0
+            self.s.pause_reason = ""
+            self.s.consec_losses = 0
         if required_margin > 0 and required_margin > self.s.wallet:
             return False, (
                 f"insufficient margin: trade needs ₹{required_margin:.2f}, "
