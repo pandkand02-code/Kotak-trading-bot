@@ -1,0 +1,65 @@
+# Auto-deploy the bot to the DigitalOcean droplet on every push.
+#
+# Setup once (in GitHub repo Settings → Secrets and variables → Actions):
+#   DO_HOST     = 139.59.70.149     (droplet's static IPv4)
+#   DO_SSH_KEY  = <full contents of your ~/.ssh/id_ed25519 private key,
+#                 including the BEGIN/END lines, no extra whitespace>
+#
+# Optional:
+#   DO_USER     = root              (defaults to root if not set)
+#   DO_PORT     = 22                (defaults to 22 if not set)
+#
+# Flow per push:
+#   1. GitHub spins up an ubuntu runner.
+#   2. Runner SSHs into the droplet using DO_SSH_KEY.
+#   3. Runner executes scripts/deploy.sh on the droplet.
+#   4. scripts/deploy.sh:
+#        - git fetch + hard-reset to the branch's HEAD
+#        - pip install --quiet (only re-resolves changed deps)
+#        - systemctl restart nexus-bot
+#        - waits for /health to return 200
+#        - prints last 10 lines of journalctl on failure
+#
+# Total runtime: ~30 s for a typical push (no new deps), ~90 s when
+# requirements.txt changes.
+
+name: Deploy to DigitalOcean
+
+on:
+  push:
+    branches:
+      - main
+      - claude/create-trading-bot-4lok9
+  # Allow re-running deploy from the Actions tab without making a new commit.
+  workflow_dispatch: {}
+
+# Cancel in-flight deploys when a newer push lands on the same branch.
+# Prevents the bot from being restarted twice in quick succession.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout (just for context in logs; the droplet pulls itself)
+        uses: actions/checkout@v4
+
+      - name: SSH to droplet and run deploy script
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:     ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER || 'root' }}
+          port:     ${{ secrets.DO_PORT || 22 }}
+          key:      ${{ secrets.DO_SSH_KEY }}
+          # Don't fail on first-connect host-key prompt — the action handles
+          # that internally by accepting + caching the key.
+          script_stop: true
+          # The branch we just pushed gets passed in so the droplet checks out
+          # the same ref the action is running for.
+          envs: GITHUB_REF_NAME
+          script: |
+            export GITHUB_REF_NAME="${{ github.ref_name }}"
+            bash /root/Kotak-trading-bot/scripts/deploy.sh
