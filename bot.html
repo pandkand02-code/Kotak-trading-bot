@@ -214,6 +214,42 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
 <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
+<!-- Debug banner: shows any JavaScript error directly on the page so we
+     don't need mobile dev tools to diagnose. Hidden until something
+     errors. Safe to leave in production — adds <300 bytes and never
+     shows unless an exception fires. -->
+<div id="_dbgBanner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:99999;background:#ffeb3b;color:#000;padding:10px 14px;font-size:12px;font-family:ui-monospace,Menlo,monospace;white-space:pre-wrap;overflow:auto;max-height:60vh;border-bottom:2px solid #b00"></div>
+<script>
+(function(){
+  var b = function(){ return document.getElementById('_dbgBanner'); };
+  function show(msg){
+    var el = b(); if(!el) return;
+    el.style.display = 'block';
+    el.textContent = (el.textContent ? el.textContent + '\n' : '') + msg;
+  }
+  window.addEventListener('error', function(e){
+    show('JS ERROR: ' + (e.message || '?') +
+         '\n  at ' + (e.filename || '?') + ':' + (e.lineno || '?') + ':' + (e.colno || '?'));
+  });
+  window.addEventListener('unhandledrejection', function(e){
+    var r = e.reason;
+    show('PROMISE REJECTION: ' +
+         (r && r.message ? r.message : (typeof r === 'string' ? r : JSON.stringify(r))));
+  });
+  // Boot ping that disappears after 4 s if no errors fire.
+  setTimeout(function(){
+    var el = b();
+    if(el && !el.textContent){
+      el.style.background = '#0a0';
+      el.style.color = '#fff';
+      el.style.display = 'block';
+      el.textContent = '✓ JS booted — tap to dismiss';
+      el.onclick = function(){ el.style.display = 'none'; };
+      setTimeout(function(){ if(el) el.style.display = 'none'; }, 3000);
+    }
+  }, 500);
+})();
+</script>
 
 <!-- HEADER -->
 <div class="hdr">
