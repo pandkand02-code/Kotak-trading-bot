@@ -2082,7 +2082,7 @@ Direction:
 - score < 0  -> PE
 - score == 0 (extremely rare) -> pick CE if news_sentiment >= 0 else PE.
 
-Five-bucket BIAS (return in `bias` field alongside `direction`):
+Five-bucket BIAS (return in 'bias' field alongside 'direction'):
   score >=  0.55  -> "STRONG_BULLISH"  (high-conviction CE only)
   score in 0.20..0.55 -> "BULLISH"
   score in -0.20..0.20 -> "NEUTRAL"     (the auto-trader will skip)
