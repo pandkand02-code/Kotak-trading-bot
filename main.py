@@ -1,4 +1,3 @@
-cat << 'EOF' > /root/Kotak-trading-bot/main.py
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -1330,4 +1329,3 @@ async def trades(req: SessionRequest):
             return data
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
-EOF
