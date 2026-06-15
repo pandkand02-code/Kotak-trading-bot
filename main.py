@@ -1065,6 +1065,10 @@ async def chain_quotes_legacy(req: ChainRequest):
 
 
 @app.post("/chain/atm")
+
+def _fo_segment(instrument: str) -> str:
+    return "bse_fo" if instrument.upper() == "SENSEX" else "nse_fo"
+
 async def chain_atm(req: ChainRequest):
     sess = get_session(req.session_id)
     inst = INSTRUMENT_TOKENS.get(req.instrument.upper())
