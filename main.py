@@ -1,4 +1,3 @@
-cat << 'EOF' > /root/Kotak-trading-bot/main.py
 """
 NEXUS Trading Bot v3 — FastAPI Backend
 Real Kotak NEO API: Live quotes, OHLC, wallet, orders
