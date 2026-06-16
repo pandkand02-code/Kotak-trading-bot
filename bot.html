@@ -7,26 +7,21 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>NEXUS · Options Bot</title>
 <style>
-/* TradingView-flavoured dark theme. Reference: TV mobile watchlist —
-   pure-black surfaces, near-white numbers, soft-grey labels, vibrant
-   green/red. System sans-serif everywhere except the LOG timestamps
-   (kept mono for column alignment). Tabular numerals across the board
-   so prices and changes line up vertically without padding tricks. */
 :root{
-  --bg:        #000000;   /* page background — pure black like TV */
-  --panel:     #0e0e0e;   /* card / panel surface, very subtle lift */
-  --panel-hi:  #181818;   /* hover / chip background */
-  --border:    #1c1c1c;   /* hairline dividers between rows */
-  --accent:    #2962ff;   /* TV blue, used for selection + ATM */
-  --green:     #22ab94;   /* TV mint-green */
-  --red:       #ef534f;   /* TV coral-red */
-  --gold:      #ff9800;   /* TV amber */
-  --dim:       #5d5d5d;   /* tertiary copy */
-  --text:      #9c9c9c;   /* secondary copy / labels */
-  --bright:    #ffffff;   /* primary numbers + tickers — pure white */
+  --bg:        #000000;
+  --panel:     #0e0e0e;
+  --panel-hi:  #181818;
+  --border:    #1c1c1c;
+  --accent:    #2962ff;
+  --green:     #22ab94;
+  --red:       #ef534f;
+  --gold:      #ff9800;
+  --dim:       #5d5d5d;
+  --text:      #9c9c9c;
+  --bright:    #ffffff;
 }
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
-html,body{font-feature-settings:"tnum" 1, "lnum" 1}  /* tabular numerals everywhere */
+html,body{font-feature-settings:"tnum" 1, "lnum" 1}
 body{
   background:var(--bg);
   color:var(--bright);
@@ -41,7 +36,6 @@ body{
 ::-webkit-scrollbar{width:3px}::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
 
-/* HEADER */
 .hdr{background:var(--bg);border-bottom:1px solid var(--border);padding:12px 16px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50}
 .logo{font-size:16px;font-weight:700;letter-spacing:2.5px;color:var(--bright)}
 .logo span{color:var(--accent)}
@@ -50,19 +44,16 @@ body{
 .dot.on{background:var(--green);box-shadow:0 0 6px var(--green)}
 .dot.off{background:var(--dim)}
 
-/* STATS — TV-style tile row, no internal borders */
 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:0;background:var(--bg);border-bottom:1px solid var(--border)}
 .stat{background:var(--bg);padding:12px 6px;text-align:center}
 .stat-l{font-size:10px;color:var(--dim);letter-spacing:1.2px;font-weight:500;text-transform:uppercase}
 .stat-v{font-size:18px;font-weight:700;margin-top:4px;color:var(--bright)}
 
-/* TABS */
 .tabs{display:flex;background:var(--bg);border-bottom:1px solid var(--border)}
 .tab{flex:1;padding:13px 0;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--dim);font-size:11px;font-family:inherit;letter-spacing:1.2px;cursor:pointer;text-transform:uppercase;font-weight:600}
 .tab.on{color:var(--bright);border-bottom-color:var(--bright)}
 .tab:active{opacity:.7}
 
-/* CONTENT */
 .content{padding:14px 14px 90px}
 .card{background:var(--panel);border:1px solid var(--border);border-radius:10px;margin-bottom:12px;overflow:hidden}
 .ch{padding:13px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--panel)}
@@ -73,12 +64,10 @@ body{
 .bb{color:var(--accent);border-color:var(--accent)}.bd{color:var(--dim);border-color:var(--dim)}
 .bgold{color:var(--gold);border-color:var(--gold)}
 
-/* FORM */
 input,select{width:100%;background:#0a0a0a;border:1px solid var(--border);color:var(--bright);padding:11px 13px;border-radius:8px;font-size:14px;font-family:inherit;outline:none;margin-bottom:10px;-webkit-appearance:none}
 input:focus,select:focus{border-color:var(--accent)}
 input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom:0;accent-color:var(--accent)}
 
-/* BUTTONS — TV chip style: rounded, dark fill, no glow */
 .btn{width:100%;padding:12px;background:var(--panel-hi);border:1px solid transparent;border-radius:8px;font-size:12px;font-family:inherit;letter-spacing:1px;cursor:pointer;text-transform:uppercase;margin-bottom:8px;font-weight:600;color:var(--bright);transition:background .15s}
 .btn:hover{background:#222}
 .btn:active{opacity:.8;transform:scale(.99)}
@@ -93,7 +82,6 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
 .btn-sm{width:auto;padding:7px 14px;font-size:11px;letter-spacing:.8px;margin:0;border-radius:6px}
 .btn-2{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
 
-/* SIGNAL */
 .sig-big{font-size:54px;font-weight:800;text-align:center;letter-spacing:3px;padding:14px 0}
 .sig-ce{color:var(--green)}
 .sig-pe{color:var(--red)}
@@ -106,7 +94,6 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
 .inv{font-size:11px;font-weight:600}
 .bull{color:var(--green)}.bear{color:var(--red)}.neut{color:var(--dim)}
 
-/* CHAIN — TV watchlist row pattern: big bright price right-aligned */
 .ch-hdr{display:grid;grid-template-columns:1fr 100px 1fr;padding:10px 14px;background:var(--bg);font-size:11px;color:var(--dim);letter-spacing:1.5px;font-weight:600;border-bottom:1px solid var(--border);text-transform:uppercase}
 .ch-row{display:grid;grid-template-columns:1fr 100px 1fr;padding:14px 14px;border-bottom:1px solid var(--border);cursor:pointer;align-items:center;transition:background .12s}
 .ch-row:hover{background:var(--panel-hi)}
@@ -116,21 +103,17 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
 .ce{color:var(--green)}.pe{color:var(--red)}
 .oism{font-size:10px;color:var(--dim);font-weight:500;margin-top:2px}
 
-/* INFO ROW */
 .irow{display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid var(--border)}
 .ilbl{font-size:11px;color:var(--dim);letter-spacing:.8px;text-transform:uppercase;font-weight:500}
 
-/* LOTS */
 .lots-c{display:flex;align-items:center;gap:14px}
 .lots-btn{width:36px;height:36px;border:1px solid var(--border);border-radius:50%;background:var(--panel-hi);color:var(--bright);font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;font-weight:600}
 .lots-btn:hover{background:#222}
 .lots-v{font-size:22px;color:var(--bright);min-width:36px;text-align:center;font-weight:700}
 
-/* SLIDER */
 .sl-row{margin-top:12px}
 .sl-hdr{display:flex;justify-content:space-between;font-size:12px;margin-bottom:6px;color:var(--text);font-weight:500}
 
-/* ORDER BOX */
 .ob{display:flex;gap:10px;margin-bottom:12px}
 .os{flex:1;border-radius:8px;padding:14px;text-align:center;cursor:pointer;transition:background .12s}
 .os:active{opacity:.8}
@@ -141,28 +124,22 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
 .os-ltp{font-size:22px;font-weight:700}
 .os-iv{font-size:11px;color:var(--dim);font-weight:500}
 
-/* POSITIONS */
 .pos{background:var(--bg);border-radius:8px;padding:12px;margin-bottom:10px;border:1px solid var(--border)}
 .pos-g{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:8px}
 .pi{background:var(--panel);border-radius:6px;padding:6px 8px}
 .pil{font-size:10px;color:var(--dim);font-weight:500;letter-spacing:.5px;text-transform:uppercase}
 .piv{font-size:12px;font-weight:600;margin-top:2px}
 
-/* LOG */
 .log-box{max-height:65vh;overflow-y:auto;padding:10px 14px}
 .ll{padding:6px 0;border-bottom:1px solid var(--border);display:flex;gap:12px;font-size:13px;color:var(--bright);line-height:1.5}
 .lt{color:var(--dim);white-space:nowrap;font-size:11px;font-weight:600;font-variant-numeric:tabular-nums;font-family:ui-monospace,Menlo,monospace;min-width:64px}
 
-/* FOOTER */
 .ftr{position:fixed;bottom:0;left:0;right:0;max-width:480px;margin:0 auto;background:var(--bg);border-top:1px solid var(--border);padding:10px 16px;display:flex;justify-content:space-between;font-size:11px;color:var(--dim);font-weight:500;letter-spacing:.4px}
 
-/* MISC */
 .ai-hint{padding:8px 12px;border-radius:8px;font-size:11px;text-align:center;margin-bottom:10px;background:#ff980018;border:1px solid #ff980040;color:var(--gold);font-weight:500}
 .step-ok{font-size:12px;color:var(--green);text-align:center;padding:9px;background:#22ab9418;border-radius:8px;margin-bottom:8px;font-weight:500}
 .totp-t{font-size:16px;font-weight:700;min-width:44px;text-align:center}
 
-/* ── GROWW-FLAVOURED COMPONENTS (SIGNAL tab top) ───────────────────────── */
-/* Market-indices quick-view cards (NIFTY + SENSEX side by side) */
 .mi-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px}
 .mi{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:13px 14px;cursor:pointer;transition:background .12s, border-color .12s}
 .mi:hover{background:var(--panel-hi)}
@@ -171,7 +148,6 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
 .mi-px{font-size:19px;font-weight:800;color:var(--bright);margin-top:8px;font-variant-numeric:tabular-nums;line-height:1}
 .mi-ch{font-size:12px;font-weight:600;margin-top:4px;font-variant-numeric:tabular-nums}
 
-/* Symbol header on chart card — big symbol, big price */
 .sym-hdr{display:flex;justify-content:space-between;align-items:flex-start;padding:16px 18px;border-bottom:1px solid var(--border)}
 .sym-l-name{font-size:22px;font-weight:800;color:var(--bright);letter-spacing:.3px;line-height:1}
 .sym-l-sub{font-size:11px;color:var(--dim);margin-top:5px;font-weight:500;letter-spacing:.3px}
@@ -183,7 +159,6 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
 .sym-return{padding:8px 16px;display:flex;justify-content:space-between;align-items:center;font-size:11px;font-weight:600;color:var(--dim);letter-spacing:.5px;text-transform:uppercase;border-bottom:1px solid var(--border)}
 .sym-return-val{font-size:13px;font-weight:700;font-variant-numeric:tabular-nums;text-transform:none}
 
-/* Timeframe pill row (1m 5m 15m 30m 1D + chart-mode toggle) */
 .tf-row{display:flex;gap:7px;padding:12px 16px;align-items:center;border-top:1px solid var(--border);flex-wrap:wrap}
 .tf-chip{padding:6px 14px;border-radius:20px;font-size:12px;color:var(--text);background:transparent;border:1px solid var(--border);cursor:pointer;font-weight:600;letter-spacing:.3px;font-family:inherit;transition:all .12s}
 .tf-chip.on{background:var(--accent);color:#fff;border-color:var(--accent)}
@@ -191,7 +166,6 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
 .tf-mode{margin-left:auto;width:34px;height:32px;display:flex;align-items:center;justify-content:center;background:var(--panel-hi);border-radius:6px;cursor:pointer;color:var(--bright);border:1px solid var(--border);font-size:13px;font-weight:700;letter-spacing:-1px}
 .tf-mode.on{border-color:var(--accent);color:var(--accent);background:#2962ff10}
 
-/* Live market snapshot — today's range + 52w range slider */
 .snap-row{padding:14px 18px;border-bottom:1px solid var(--border)}
 .snap-row:last-child{border-bottom:none}
 .snap-lbls{display:flex;justify-content:space-between;font-size:11px;color:var(--dim);font-weight:500;text-transform:uppercase;letter-spacing:.4px}
@@ -200,20 +174,44 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
 .snap-marker{position:absolute;top:-5px;width:0;height:0;border-left:7px solid transparent;border-right:7px solid transparent;border-bottom:10px solid var(--green);transform:translateX(-50%);transition:left .4s ease;filter:drop-shadow(0 0 4px #22ab9466)}
 .snap-marker.dn{border-bottom-color:var(--red);filter:drop-shadow(0 0 4px #ef534f66)}
 
-/* Trade-from-charts callout */
 .tfc{display:flex;justify-content:space-between;align-items:center;padding:14px 16px;background:linear-gradient(90deg, #0d1a2e, #0e0e0e);border:1px solid var(--border);border-radius:12px;margin-bottom:14px;cursor:pointer;transition:border-color .12s}
 .tfc:hover{border-color:var(--accent)}
 .tfc-l-t{font-size:14px;font-weight:700;color:var(--bright)}
 .tfc-l-s{font-size:11px;color:var(--dim);margin-top:3px;font-weight:500}
 .tfc-r{font-size:18px;color:var(--accent);font-weight:700}
 </style>
-<!-- Lightweight Charts (Apache-2.0, made by TradingView). Renders OHLC
-     candles from data WE supply — no third-party data entitlement
-     required. We feed it the Kotak tick stream the rest of the bot
-     already uses. -->
 <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
+<div id="_dbgBanner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:99999;background:#ffeb3b;color:#000;padding:10px 14px;font-size:12px;font-family:ui-monospace,Menlo,monospace;white-space:pre-wrap;overflow:auto;max-height:60vh;border-bottom:2px solid #b00"></div>
+<script>
+(function(){
+  var b = function(){ return document.getElementById('_dbgBanner'); };
+  function show(msg){
+    var el = b(); if(!el) return;
+    el.style.display = 'block';
+    el.textContent = (el.textContent ? el.textContent + '\n' : '') + msg;
+  }
+  window.addEventListener('error', function(e){
+    show('JS ERROR: ' + (e.message || '?') + '\n  at ' + (e.filename || '?') + ':' + (e.lineno || '?') + ':' + (e.colno || '?'));
+  });
+  window.addEventListener('unhandledrejection', function(e){
+    var r = e.reason;
+    show('PROMISE REJECTION: ' + (r && r.message ? r.message : (typeof r === 'string' ? r : JSON.stringify(r))));
+  });
+  setTimeout(function(){
+    var el = b();
+    if(el && !el.textContent){
+      el.style.background = '#0a0';
+      el.style.color = '#fff';
+      el.style.display = 'block';
+      el.textContent = '✓ JS booted — tap to dismiss';
+      el.onclick = function(){ el.style.display = 'none'; };
+      setTimeout(function(){ if(el) el.style.display = 'none'; }, 3000);
+    }
+  }, 500);
+})();
+</script>
 
 <!-- HEADER -->
 <div class="hdr">
@@ -226,7 +224,7 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
     <div style="display:flex;align-items:center;gap:8px;font-size:10px;justify-content:flex-end;margin-top:3px">
       <span><span class="dot off" id="sDot"></span><span id="sLbl">SERVER</span></span>
       <span><span class="dot off" id="aDot"></span><span id="aLbl">AUTH</span></span>
-      <span title="Order placement authority. Run TEST ORDER once to verify the Kotak account can actually place trades from this server."><span class="dot off" id="tDot"></span><span id="tLbl">TRADE✗</span></span>
+      <span title="Order placement authority. Run TEST ORDER once to verify."><span class="dot off" id="tDot"></span><span id="tLbl">TRADE✗</span></span>
       <span><span class="dot off" id="bDot"></span><span id="bLbl">BOT</span></span>
     </div>
   </div>
@@ -253,9 +251,6 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
 
   <!-- SIGNAL -->
   <div id="t-signal">
-
-    <!-- Market-indices quick view (Groww-style horizontal pair). Tap one
-         to make it the active instrument across the bot. -->
     <div class="mi-row">
       <div class="mi active" id="mi-NIFTY" onclick="selectIndex('NIFTY')">
         <div class="mi-name">NIFTY</div>
@@ -269,7 +264,6 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
       </div>
     </div>
 
-    <!-- Chart card with Groww-style header + area chart + TF pills. -->
     <div class="card" style="padding:0">
       <div class="sym-hdr">
         <div>
@@ -296,9 +290,6 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
       </div>
     </div>
 
-    <!-- Trade-from-Charts callout. Reuses the existing order-entry panel
-         in the CHAIN tab, so the user lands on the same flow as a
-         manual strike-tap. -->
     <div class="tfc" onclick="gt('chain')">
       <div>
         <div class="tfc-l-t">Trade from Charts</div>
@@ -307,7 +298,6 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
       <div class="tfc-r">→</div>
     </div>
 
-    <!-- Live market snapshot — today's range (open / high / low / spot). -->
     <div class="card">
       <div class="ch">
         <span class="ct">Live market snapshot</span>
@@ -324,10 +314,6 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
       </div>
     </div>
 
-    <!-- Technicals card — live numeric values computed from the bar
-         buffer (RSI, MACD, EMA9/EMA20) plus ATM-strike OI + Volume from
-         the Kotak quote feed. These complement the qualitative indicator
-         chips in the AI Signal Engine card below. -->
     <div class="card">
       <div class="ch">
         <span class="ct">Technicals</span>
@@ -393,10 +379,7 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
         </div>
         <input id="tgChan" placeholder="e.g. stocknews_india" onchange="setTgChannel()" style="margin-top:4px">
         <div style="font-size:10px;color:var(--dim);margin-top:-4px;margin-bottom:6px">
-          Paste a public channel username. The bot scrapes the last ~20
-          messages every 3 min and merges sentiment into the AI decision.
-          Private channels won't work via this path — ask me for the
-          bot-token route if your channel is private.
+          Paste a public channel username. The bot scrapes the last ~20 messages.
         </div>
         <div class="irow" style="margin-top:10px">
           <span class="ilbl">Lots (<span id="lsLbl">75</span>/lot)</span>
@@ -554,35 +537,29 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
 </div>
 
 <script>
-// ── STATE ──────────────────────────────────────────────────────────────────
 const BASE = window.location.origin;
 const CLAUDE = "https://api.anthropic.com/v1/messages";
-// Lot sizes per index. SENSEX weekly options ship a 20-lot. Scrip-master
-// returns the authoritative lot per leg — these are header-display only.
 const LS = {NIFTY:75, SENSEX:20};
 const G = {
-  sid:null, spot:{NIFTY:0, SENSEX:0},  // 0 until first real Kotak tick
-  _simSpot:{NIFTY:24350, SENSEX:80000}, // simulator-only baseline (no-session demo)
+  sid:null, spot:{NIFTY:0, SENSEX:0},
+  _simSpot:{NIFTY:24350, SENSEX:80000},
   inst:"NIFTY", lots:1, chain:[], selRow:null, sig:null,
   botOn:false, botIv:null, open:[], done:[], pnl:0, logN:0, wallet:null,
   orderAuthVerified:false,
-  // Autonomous-trade gates (read by cycle()).
   lastEntryTs:    0,
   maxConcurrent:  3,
   minConfidence:  70,
   cooldownMs:     5*60*1000,
-  rlHeadroom:     0.90,        // refuse new auto-trade if any limiter > 90%
-  news:           null         // { score:-1..+1, headlines:[], ts }
+  rlHeadroom:     0.90,
+  news:           null
 };
 const mon = {};
 
-// ── TABS ──────────────────────────────────────────────────────────────────
 function gt(n){
   document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('on',['signal','chain','wallet','orders','log'][i]===n));
   ['signal','chain','wallet','orders','log'].forEach(t=>document.getElementById('t-'+t).style.display=t===n?'block':'none');
 }
 
-// ── LOG ───────────────────────────────────────────────────────────────────
 function log(msg,type='info'){
   const C={info:'var(--bright)',success:'var(--green)',warn:'var(--gold)',error:'var(--red)',trade:'var(--accent)'};
   const box=document.getElementById('logBox');
@@ -595,20 +572,15 @@ function log(msg,type='info'){
 }
 function clrLog(){document.getElementById('logBox').innerHTML='<div style="text-align:center;color:var(--dim);font-size:12px;padding:20px 0">Cleared</div>';G.logN=0;document.getElementById('logCnt').textContent='0';}
 
-// ── TOTP TICK ─────────────────────────────────────────────────────────────
 setInterval(()=>{
   const s=30-(Math.floor(Date.now()/1000)%30);
   const el=document.getElementById('totpT');
   el.textContent=s+'s'; el.style.color=s<=10?'var(--red)':'var(--accent)';
 },1000);
 
-// ── REAL LIVE MARKET DATA FROM KOTAK ─────────────────────────────────────
-G.marketData = {}; // stores real OHLC, change, vix per instrument
+G.marketData = {};
 G.liveDataInterval = null;
 
-// Quote-stream watchdog state. The browser polls /quotes/market_data every
-// 5 s. Transient blips happen; persistent ones mean our decisions would be
-// based on stale prices. We track consecutive fails and escalate visibly.
 G.quoteFailStreak = 0;
 G.quoteStale      = false;
 G.lastQuoteAt     = 0;
@@ -623,16 +595,14 @@ function _onQuoteOk(){
 }
 function _onQuoteFail(reason){
   G.quoteFailStreak += 1;
-  // 3 consecutive fails = amber warning, mark stream stale.
   if(G.quoteFailStreak === 3){
     G.quoteStale = true;
     const aD=document.getElementById('aDot'), aL=document.getElementById('aLbl');
     aD.className='dot off'; aL.textContent='STALE';
-    log('⚠ QUOTE STREAM STALE: 3 consecutive fetch failures ('+reason+'). LTPs may be old. Bot decisions disabled until stream recovers.','error');
+    log('⚠ QUOTE STREAM STALE: 3 consecutive fetch failures ('+reason+').','error');
   }
-  // 6 consecutive = auto-halt bot to prevent trades on stale prices.
   if(G.quoteFailStreak === 6 && G.botOn){
-    log('🛑 AUTO-HALTING BOT — 6 quote failures in a row. Resume manually once stream is healthy.','error');
+    log('🛑 AUTO-HALTING BOT — 6 quote failures.','error');
     if(typeof stopBot === 'function') stopBot();
   }
 }
@@ -641,12 +611,8 @@ async function fetchLiveMarketData(){
   if(!G.sid){ return; }
   try{
     const res = await api('/quotes/market_data',{session_id:G.sid, instrument:G.inst});
-    // Log raw response for debugging
-    if(res.error){
-      log('Quote API error: '+res.error,'error');
-    }
+    if(res.error){ log('Quote API error: '+res.error,'error'); }
     if(res && res.ltp && res.ltp > 0){
-      // ✅ REAL DATA received
       G.spot[G.inst] = res.ltp;
       G.marketData[G.inst] = res;
       const el=document.getElementById('spotEl');
@@ -655,123 +621,72 @@ async function fetchLiveMarketData(){
       el.style.color=chng>=0?'var(--green)':'var(--red)';
       if(res.vix && res.vix>0) G.liveVix=res.vix;
       buildChain();
-      quickLean();                                      // sub-cycle direction refresh (no LLM call)
-      pushTickToChart(res.ltp, Date.now());             // feed live tick → chart
-      updateSymbolHeader(res.ltp, chng, res.prev_close || res.open || 0); // ref = Kotak prev close (matches Neo app)
-      updateSnapshot();                                 // today's high/low slider
-      paintMiCard(G.inst, res.ltp, chng);               // active market card
-      fetchOtherIndex();                                // keep the OTHER card live too
-      refreshTechnicals();                              // RSI/MACD/EMA/VWAP/Bias from chart bars
-      log('✅ REAL: '+G.inst+' ₹'+res.ltp.toFixed(2)+' | Chg:'+(chng>=0?'+':'')+chng.toFixed(2)+'% | VIX:'+(res.vix?res.vix.toFixed(2):'—'),'success');
+      quickLean();
+      pushTickToChart(res.ltp, Date.now());
+      updateSymbolHeader(res.ltp, chng, res.prev_close || res.open || 0);
+      updateSnapshot();
+      paintMiCard(G.inst, res.ltp, chng);
+      fetchOtherIndex();
+      refreshTechnicals();
+      log('REAL: '+G.inst+' ₹'+res.ltp.toFixed(2)+' | Chg:'+(chng>=0?'+':'')+chng.toFixed(2)+'% | VIX:'+(res.vix?res.vix.toFixed(2):'—'),'success');
       _onQuoteOk();
     } else {
-      // API returned 0 or no data — log what we got
-      log('Quote returned 0 (items:'+res.raw_count+') — check LOG tab. Using last price.','warn');
-      // Keep last known price, just small drift
+      log('Quote returned 0 — using last price.','warn');
       G.spot[G.inst] = +(G.spot[G.inst]+(Math.random()-.49)*2).toFixed(2);
       buildChain();
       _onQuoteFail('empty payload');
     }
   }catch(e){
-    if(e.message !== 'RATE_LIMITED'){
-      log('Quote fetch error: '+e.message,'error');
-    }
+    if(e.message !== 'RATE_LIMITED'){ log('Quote fetch error: '+e.message,'error'); }
     G.spot[G.inst] = +(G.spot[G.inst]+(Math.random()-.49)*2).toFixed(2);
     buildChain();
     _onQuoteFail(e.message || 'unknown');
   }
 }
 
-// Manual test button — call this from LOG tab
 async function testQuoteAPI(){
   if(!G.sid){log('Login first.','warn');return;}
   log('Testing Kotak Quote API directly...','info');
   try{
     const res = await api('/quotes/market_data',{session_id:G.sid,instrument:G.inst});
     log('Quote: ltp='+res.ltp+' chg='+res.change+'% chg_abs='+res.change_abs+' prev_close='+res.prev_close+' open='+res.open,'trade');
-    if(res.raw_yahoo){
-      log('Yahoo OHLC: '+JSON.stringify(res.raw_yahoo),'success');
-    } else {
-      log('Yahoo OHLC FAILED: '+(res.yahoo_error||'?'),'warn');
-    }
-    if(res.raw_qq){
-      log('Kotak /quick/quotes: '+JSON.stringify(res.raw_qq).substring(0,500),'info');
-    } else {
-      log('Kotak /quick/quotes FAILED: '+(res.qq_error||'no body'),'warn');
-    }
-    if(res.raw_ltp_item){
-      log('Raw Kotak /script-details: '+JSON.stringify(res.raw_ltp_item),'info');
-    }
-  }catch(e){
-    log('Quote API test failed: '+e.message,'error');
-  }
+    if(res.raw_yahoo){ log('Yahoo OHLC: '+JSON.stringify(res.raw_yahoo),'success'); }
+    if(res.raw_ltp_item){ log('Raw Kotak /script-details: '+JSON.stringify(res.raw_ltp_item),'info'); }
+  }catch(e){ log('Quote API test failed: '+e.message,'error'); }
 }
 
-// Order-placement smoke test. Places a 1-lot far-OTM CE BUY LIMIT @ ₹0.05
-// and immediately cancels. Surfaces any IP-whitelist or permissions error
-// from Kotak so we know whether the Railway IP can actually trade before
-// migrating to a static-IP VPS.
 async function testKotakOrder(){
   if(!G.sid){log('Login first.','warn');return;}
-  if(!confirm('Place a 1-lot BUY LIMIT @ ₹0.05 for ATM CE and immediately cancel?\n\nMax possible loss if it somehow filled: ₹3.75.\n\nThis tests whether your Kotak account allows trades from the current server IP.')) return;
-  log('🧪 TEST ORDER: placing 1-lot ATM CE @ ₹0.05 BUY LIMIT...','trade');
+  if(!confirm('Place a 1-lot BUY LIMIT @ safety limit price and immediately cancel? This tests connectivity.')) return;
+  log('TEST ORDER: placing 1-lot @ safety limit price BUY LIMIT...','trade');
   try{
     const res = await api('/orders/test_place',{session_id:G.sid,instrument:G.inst,price:0.05,qty_lots:1});
     if(res.success){
-      log('✅ ORDER ACCEPTED by Kotak. OrdNo: '+res.place.order_no+'. The Railway IP can trade — no whitelist needed.','success');
-      log('Cancel result: '+JSON.stringify(res.cancel).substring(0,200),'info');
-      // Unlock the order-auth gate. Live trades can now go to Kotak.
+      log('ORDER ACCEPTED by Kotak. OrdNo: '+res.place.order_no+'. Connection OK.','success');
+      log('Cancel result: '+JSON.stringify(res.cancel).substring(0,200), 'info');
       G.orderAuthVerified = true;
       const tD=document.getElementById('tDot'), tL=document.getElementById('tLbl');
       if(tD){tD.className='dot on';} if(tL){tL.textContent='TRADE✓';}
-      log('🔓 Order-auth gate UNLOCKED — live trades will now be sent to Kotak.','success');
     } else {
-      log('❌ ORDER REJECTED at stage='+(res.stage||'place')+' — '+(res.rejected_reason||'see body'),'error');
-      log('HTTP '+res.place?.http_status+' ('+(res.place?.content_type||'?')+'): '+(res.place?.body_snippet||'').substring(0,300),'warn');
-      // Look for IP-whitelist signals — but ONLY in fields that come
-      // from Kotak (body_snippet + rejected_reason). The full response
-      // also contains our own diagnostic hint string, which would
-      // otherwise produce false-positive matches.
-      const kotakText = (
-        (res.place?.body_snippet || '') + ' ' + (res.rejected_reason || '')
-      ).toLowerCase();
-      const ipHit = ['ip whitelist','ip not','access denied','forbidden','403','unauthorized ip','restricted ip']
-        .find(k => kotakText.includes(k));
-      if(ipHit){
-        log('🛑 IP WHITELIST ERROR DETECTED: "'+ipHit+'" — you need a static-IP VPS for trading.','error');
-      } else {
-        log('No IP-whitelist keywords in response. Rejection is for another reason (margin, symbol, market hours, etc.).','info');
-      }
+      log('ORDER REJECTED at stage='+(res.stage||'place')+' — '+(res.rejected_reason||'see body'),'error');
+      log('Cancel result: '+JSON.stringify(res.cancel).substring(0,200), 'warn');
+      const kotakText = ((res.place?.body_snippet || '') + ' ' + (res.rejected_reason || '')).toLowerCase();
+      const ipHit = ['ip whitelist','ip not','access denied','forbidden','403','unauthorized ip','restricted ip'].find(k => kotakText.includes(k));
+      if(ipHit){ log('IP WHITELIST ERROR DETECTED: "'+ipHit+'" — you need a static-IP VPS.','error'); }
     }
-  }catch(e){
-    log('Test order failed: '+e.message,'error');
-  }
+  }catch(e){ log('Test order failed: '+e.message,'error'); }
 }
 
-// Start live feed when authenticated, else use simulated
 function startLiveFeed(){
   if(G.liveDataInterval) clearInterval(G.liveDataInterval);
   if(G.sid){
     log('Starting REAL Kotak live data feed...','success');
-    // Drop any chart bars accumulated under simulator-mode so the real
-    // feed starts from a clean slate. (Belt-and-braces — we also stopped
-    // pushing sim ticks into the chart, but if an older session left
-    // sim bars in G.chartBars, wipe them here.)
     G.chartBars = {};
     if(G.tvSeries){ try{ G.tvSeries.setData([]); }catch(_){} }
-    fetchLiveMarketData(); // immediate first call
-    G.liveDataInterval = setInterval(fetchLiveMarketData, 5000); // every 5 seconds
+    fetchLiveMarketData();
+    G.liveDataInterval = setInterval(fetchLiveMarketData, 5000);
   } else {
-    // Simulated fallback when not authenticated — only the two
-    // benchmarks the bot trades. Tick = small random drift around last.
     G.liveDataInterval = setInterval(()=>{
-      // Drift the simulator's own baseline; G.spot stays 0 until a real
-      // Kotak session is established so we don't confuse the chart with
-      // a fake-baseline drop on the first real tick. CRITICALLY: we do
-      // NOT push simulator ticks into the chart — earlier behavior was
-      // building a fake bar at ~24350 (simulator's last value) so when
-      // the first real tick arrived (~23721) the chart drew a huge fake
-      // drop. Chart stays empty until the first real Kotak tick.
       G._simSpot.NIFTY  = +(G._simSpot.NIFTY  + (Math.random()-.49)*8 ).toFixed(2);
       G._simSpot.SENSEX = +(G._simSpot.SENSEX + (Math.random()-.49)*25).toFixed(2);
       G.spot.NIFTY  = G._simSpot.NIFTY;
@@ -784,28 +699,22 @@ function startLiveFeed(){
     },3000);
   }
 }
-startLiveFeed(); // start simulated on load, switches to real after auth
+startLiveFeed();
 
-// ── API ───────────────────────────────────────────────────────────────────
 async function api(path,body={},method='POST'){
   const o={method,headers:{'Content-Type':'application/json'}};
   if(method!=='GET') o.body=JSON.stringify(body);
   const r=await fetch(BASE+path,o);
   if(r.status===429){
     const err=await r.json().catch(()=>({}));
-    log('⚠ Rate limit hit: '+( err.detail||'Too many requests. Wait 1 sec.'),'warn');
+    log('⚠ Rate limit hit.','warn');
     throw new Error('RATE_LIMITED');
   }
-  // 401 from any session-bound endpoint means the backend lost our sid
-  // (and rehydrate has already failed on page load, otherwise we wouldn't
-  // be here). Drop the persisted blob so the next refresh shows the
-  // login form instead of trying to rehydrate again.
   if(r.status===401 && path !== '/auth/check' && path !== '/auth/rehydrate'){
     try{ localStorage.removeItem('nexus_session'); }catch(_){}
     if(G.sid){
       G.sid = null;
-      log('🔒 Session expired — please log in again.','warn');
-      // Soft-revert the UI to the login form without clobbering other state.
+      log('Session expired — please log in again.','warn');
       try{
         document.getElementById('aDone').style.display='none';
         document.getElementById('aS1').style.display='block';
@@ -816,7 +725,6 @@ async function api(path,body={},method='POST'){
   return r.json();
 }
 
-// ── SERVER CHECK ─────────────────────────────────────────────────────────
 async function chkServer(){
   try{
     await api('/health',{},'GET');
@@ -824,7 +732,6 @@ async function chkServer(){
     document.getElementById('fSrv').textContent='SERVER ✓';
     document.getElementById('fSrv').style.color='var(--green)';
     log('✓ Backend server connected','success');
-    // Also fetch rate limit status
     fetchRateStatus();
   }catch(e){
     document.getElementById('fSrv').textContent='SERVER ✗';
@@ -836,16 +743,12 @@ async function fetchRateStatus(){
   try{
     const r = await api('/rate_limit/status',{},'GET');
     const gen = r.general_api;
-    const ord = r.order_api;
-    log(`Rate limits — General: ${gen.used}/${gen.limit} per sec | Orders: ${ord.used}/${ord.limit} per min | Blocked: ${r.total_blocked}`,'info');
-    // Update footer with rate info
+    log(`Rate limits — General: ${gen.used}/${gen.limit} per sec`,'info');
     document.getElementById('fSrv').textContent=`SERVER ✓ (${gen.remaining}/sec)`;
   }catch{}
 }
-// Refresh rate status every 10 seconds
 setInterval(fetchRateStatus, 10000);
 
-// ── AUTH ─────────────────────────────────────────────────────────────────
 async function doS1(){
   const t=document.getElementById('accTok').value.trim();
   const m=document.getElementById('mobNo').value.trim();
@@ -875,10 +778,6 @@ async function doS2(){
   try{
     const res=await api('/auth/validate',{access_token:window._at,view_token:window._vt,view_sid:window._vs,mpin:mp});
     if(res.success){
-      // Persist the full session blob to localStorage so a tab refresh —
-      // and even a Railway redeploy — does NOT force a re-login. See
-      // restoreSession() at the bottom of this file. Tokens are stored
-      // client-side; acceptable for a single-user personal bot.
       try{
         localStorage.setItem('nexus_session', JSON.stringify({
           session_id:   res.session_id,
@@ -886,16 +785,12 @@ async function doS2(){
           saved_at:     Date.now(),
           ttl_hours:    res.ttl_hours || 20
         }));
-      }catch(_){ /* localStorage may be disabled in private mode */ }
-      activateSession(res.session_id, /*restored=*/false);
+      }catch(_){}
+      activateSession(res.session_id, false);
     }else{log('MPIN failed: '+(res.message||'?'),'error');btn.disabled=false;btn.textContent='✓ STEP 2: VALIDATE MPIN';}
   }catch(e){log('Step 2 error: '+e.message,'error');btn.disabled=false;btn.textContent='✓ STEP 2: VALIDATE MPIN';}
 }
 
-// Switch the UI from the login form to the authenticated state. Used both
-// for fresh logins (after MPIN validate) and for restored sessions on
-// page load. Keeping it in one place ensures the two paths can never
-// diverge.
 function activateSession(sid, restored){
   G.sid = sid;
   document.getElementById('aS1').style.display='none';
@@ -914,12 +809,7 @@ function activateSession(sid, restored){
 
 function doLogout(){
   G.sid=null;
-  // Drop the persisted blob so refresh does not re-authenticate behind
-  // the user's back. (For a tab refresh that should stay logged in,
-  // never call doLogout — let restoreSession run on the next load.)
   try{ localStorage.removeItem('nexus_session'); }catch(_){}
-  // Order-auth was tied to this Kotak session — invalidate on logout so
-  // the user must re-run TEST ORDER after re-authenticating.
   G.orderAuthVerified=false;
   document.getElementById('tDot').className='dot off';
   document.getElementById('tLbl').textContent='TRADE✗';
@@ -932,7 +822,6 @@ function doLogout(){
   log('Logged out.','warn');
 }
 
-// ── WALLET ────────────────────────────────────────────────────────────────
 async function fetchWallet(){
   if(!G.sid) return;
   try{
@@ -949,20 +838,11 @@ async function fetchWallet(){
       ['Auto Lots (15%)',String(al),'var(--accent)'],
     ].map(([k,v,c])=>`<div class="irow"><span class="ilbl">${k}</span><span style="color:${c};font-size:13px">${v}</span></div>`).join('');
     log('Wallet: ₹'+avl.toLocaleString('en-IN',{maximumFractionDigits:0})+' available','success');
-    // Always show which Kotak field we picked + every key Kotak returned, so
-    // we can spot mis-mapped fields (e.g. picking Net when raw Cash was wanted).
-    if(d._sources){
-      log('Wallet source fields: '+JSON.stringify(d._sources),'info');
-    }
-    if(Array.isArray(d._keys)){
-      log('Wallet keys from Kotak: '+d._keys.join(', '),'info');
-    }
-    // Surface the risk engine snapshot every wallet refresh.
     if(d.risk){
       const rs=d.risk;
       const tgt=rs.targets||{};
       const pct=(rs.realised_pnl_pct||0).toFixed(2);
-      log(`Risk: day_start ₹${(rs.day_start||0).toFixed(0)} | P&L ₹${(rs.realised_pnl||0).toFixed(0)} (${pct}%) | TP+₹${(tgt.daily_profit_inr||0).toFixed(0)} / SL-₹${Math.abs(tgt.daily_loss_inr||0).toFixed(0)}`,'info');
+      log(`Risk: P&L ₹${(rs.realised_pnl||0).toFixed(0)} (${pct}%)`,'info');
       if(rs.halted) log('🛑 Risk halted: '+rs.halted_reason,'error');
     }
   }catch(e){log('Wallet error: '+e.message,'error');}
@@ -973,7 +853,6 @@ async function fetchPos(){
   try{const d=await api('/positions',{session_id:G.sid});if(d?.data)log('Positions: '+d.data.length+' entries','info');}catch{}
 }
 
-// ── CHAIN ─────────────────────────────────────────────────────────────────
 function bs(S,K,T,sig,r,type){
   if(T<=0||sig<=0)return Math.max(0,type==='CE'?S-K:K-S);
   const d1=(Math.log(S/K)+(r+.5*sig*sig)*T)/(sig*Math.sqrt(T)),d2=d1-sig*Math.sqrt(T);
@@ -983,128 +862,77 @@ function bs(S,K,T,sig,r,type){
 }
 function dte(){const d=new Date(),day=d.getDay();return Math.max(1,(4-day+7)%7||7)/365;}
 
-// NSE F&O hours: 09:15–15:30 IST, Mon–Fri. Returns {open: bool, reason: str}.
-// Built on epoch ms so the user's phone timezone doesn't matter.
 function marketStatus(){
-  const istMs = Date.now() + 5.5 * 3600 * 1000;  // shift epoch +5:30
+  const istMs = Date.now() + 5.5 * 3600 * 1000;
   const ist = new Date(istMs);
-  const day = ist.getUTCDay(); // after the +5:30 shift, getUTC* reads as IST
+  const day = ist.getUTCDay();
   if(day === 0) return {open: false, reason: 'Sunday — NSE closed'};
   if(day === 6) return {open: false, reason: 'Saturday — NSE closed'};
   const mins = ist.getUTCHours()*60 + ist.getUTCMinutes();
-  const OPEN  = 9*60 + 15;   // 09:15 IST
-  const CLOSE = 15*60 + 30;  // 15:30 IST
+  const OPEN  = 9*60 + 15;
+  const CLOSE = 15*60 + 30;
   if(mins < OPEN)  return {open: false, reason: 'Pre-market (opens 09:15 IST)'};
   if(mins >= CLOSE) return {open: false, reason: 'Post-market (closed 15:30 IST)'};
   return {open: true, reason: 'NSE live session'};
 }
 
-// IST clock helpers used by the spec-mandated timing gates below.
 function _istMins(){
   const ist = new Date(Date.now() + 5.5 * 3600 * 1000);
   return ist.getUTCHours()*60 + ist.getUTCMinutes();
 }
 function _istDOW(){
   const ist = new Date(Date.now() + 5.5 * 3600 * 1000);
-  return ist.getUTCDay(); // 0=Sun ... 2=Tue ... 5=Fri
-}
-function _istDateStr(){
-  const ist = new Date(Date.now() + 5.5 * 3600 * 1000);
-  return ist.toISOString().slice(0, 10);
+  return ist.getUTCDay();
 }
 
-// Spec timing rules:
-//   - no entries 09:15..09:30  (skip opening volatility)
-//   - no entries after 14:40   (intraday only, avoid close)
-//   - no entries on expiry days:
-//        NIFTY weekly  = Tuesday   (NSE current convention; may shift —
-//                                   override via G.expiryOverride if NSE
-//                                   moves it again)
-//        SENSEX weekly = Friday    (BSE current convention)
-//   - hard auto-exit of all open positions at 15:20 IST
-const ENTRY_OPEN_MIN  = 9*60 + 30;   // 09:30
-const ENTRY_CLOSE_MIN = 14*60 + 40;  // 14:40
-const AUTO_EXIT_MIN   = 15*60 + 20;  // 15:20
+const ENTRY_OPEN_MIN  = 9*60 + 30;
+const ENTRY_CLOSE_MIN = 14*60 + 40;
+const AUTO_EXIT_MIN   = 15*60 + 20;
 
 function _isExpiryDay(){
   const dow = _istDOW();
-  // NIFTY weekly = Tuesday (2); SENSEX weekly = Friday (5).
   if(G.inst === 'NIFTY'  && dow === 2) return true;
   if(G.inst === 'SENSEX' && dow === 5) return true;
   return false;
 }
 
-// Returns {ok:true} or {ok:false, reason}. The single source of truth used
-// by dispatchAutoTrade — never short-circuited or bypassed.
 function entryWindowAllowed(){
   const mkt = marketStatus();
   if(!mkt.open) return {ok:false, reason: mkt.reason};
   const mins = _istMins();
-  if(mins < ENTRY_OPEN_MIN)
-    return {ok:false, reason: `pre-09:30 opening volatility window (${Math.floor(mins/60)}:${String(mins%60).padStart(2,'0')} IST)`};
-  if(mins >= ENTRY_CLOSE_MIN)
-    return {ok:false, reason: `after 14:40 cut-off — no fresh intraday entries`};
-  if(_isExpiryDay())
-    return {ok:false, reason: `${G.inst} expiry day — gamma/decay risk too high, trading disabled`};
+  if(mins < ENTRY_OPEN_MIN) return {ok:false, reason: `pre-09:30 opening window`};
+  if(mins >= ENTRY_CLOSE_MIN) return {ok:false, reason: `after 14:40 cut-off`};
+  if(_isExpiryDay()) return {ok:false, reason: `${G.inst} expiry day risk`};
   return {ok:true};
 }
 
-// Real option chain. Pulls strikes + per-leg LTP + the real Kotak
-// p_trd_symbol / p_symbol from /chain/atm and renders them. Cached for
-// G.chainTtlMs because /chain/atm makes ~22 Kotak calls per build (one
-// LTP per leg) and we do not want that on every 5 s tick.
-//
-// Falls back to the local Black-Scholes synthesiser only when there is
-// no session (e.g. between page load and login) so the user sees a
-// non-empty chain immediately. Once logged in, every render is real.
 G.lastChainFetch = 0;
-G.chainTtlMs     = 10000;   // 10 s — refreshes ~6×/min, well under Kotak's
-                            // 600/min general cap (each /chain/atm call
-                            // issues ~22 leg-LTP fetches = ~132/min worst
-                            // case; we still have ~78 % headroom for the
-                            // rest of the bot).
+G.chainTtlMs     = 10000;
 G.chainBusy      = false;
 G.chainExpiry    = '';
 
-// Kotak's scrip master ships option expiry as an integer that decodes to
-// "seconds since 1980-01-01 00:00 IST" — value 1463668200 maps to mid-May
-// 2026, which lines up with the user's 2026 trading day. We try unix-seconds
-// first (covers the cases where Kotak ships a normal epoch), and fall back
-// to the 1980-IST offset if year is implausible. If we still cannot make
-// sense of it, the raw value is shown so debugging is easy.
 function fmtExpiry(v){
   if(v == null || v === '') return '';
   const n = parseInt(v, 10);
   if(!Number.isFinite(n)) return String(v);
-  const candidates = [
-    new Date(n * 1000),                       // plain unix seconds
-    new Date((n + 315513000) * 1000),          // +1980-01-01 IST offset (Kotak)
-  ];
-  for(const d of candidates){
-    const y = d.getFullYear();
-    if(y >= 2024 && y <= 2031){
-      return d.toLocaleDateString('en-IN', {day:'2-digit', month:'short', year:'numeric'}).toUpperCase();
-    }
+  const d = new Date((n + 315513000) * 1000);
+  const y = d.getFullYear();
+  if(y >= 2024 && y <= 2031){
+    return d.toLocaleDateString('en-IN', {day:'2-digit', month:'short', year:'numeric'}).toUpperCase();
   }
   return String(v);
 }
 
 function _renderChain(){
-  // Pull strikes from G.chain (already sorted by strike asc). selRow keeps
-  // its position by strike-key match.
   const atmLbl = document.getElementById('atmLbl');
   const exLbl  = document.getElementById('cInstLbl');
   const body   = document.getElementById('chainBody');
   if(!G.chain || !G.chain.length){
-    body.innerHTML = '<div style="text-align:center;color:var(--dim);padding:18px;font-size:11px">No chain yet — waiting for Kotak…</div>';
+    body.innerHTML = '<div style="text-align:center;color:var(--dim);padding:18px;font-size:11px">No chain yet — waiting...</div>';
     return;
   }
   atmLbl.textContent = G.chain.find(r=>r.atm)?.strike ?? Math.round(G.spot[G.inst]||0);
   exLbl.textContent  = G.inst + (G.chainExpiry ? ' · '+fmtExpiry(G.chainExpiry) : '');
-  // Render '—' for legs with ltp<=0 instead of '₹0.00'. A zero LTP is
-  // almost always a transient leg-fetch failure (one of the 22 per-leg
-  // /script-details calls timed out); a misleading ₹0.00 row would make
-  // the user think the strike is actually free.
   const fmtLtp = (leg) => (leg && leg.ltp > 0) ? '₹'+leg.ltp.toFixed(2) : '<span style="color:var(--dim)">—</span>';
   body.innerHTML = G.chain.map((row,i)=>{
     const sel = G.selRow?.strike === row.strike;
@@ -1126,20 +954,9 @@ function _renderChain(){
   }).join('');
 }
 
-// ── SELF-HOSTED LIVE CHART (Lightweight Charts + Kotak ticks) ─────────────
-// TradingView's free embed widget refuses real-time Indian indices with
-// "This symbol is only available on TradingView" — their data
-// entitlements need a paid plan. We side-step that by rendering OHLC
-// candles ourselves using the exact tick stream the bot already trades
-// on. Zero data lag because the chart updates the moment our 5 s tick
-// arrives. No CORS, no iframe gating, no symbol restrictions.
-//
-// API shape used: TradingView's open-source Lightweight Charts (loaded
-// from CDN in <head>). Bar timestamps are unix-seconds, IST.
-G.chartTf       = 1;              // default 1-minute candles so the chart
-                                  // fills within a minute of session start
-G.chartMode     = 'area';         // 'area' (gradient line, Groww-style) or 'candles'
-G.chartBars     = {};             // {NIFTY:[bar,…], SENSEX:[bar,…]}
+G.chartTf       = 1;
+G.chartMode     = 'area';
+G.chartBars     = {};
 G.tvChart       = null;
 G.tvSeries      = null;
 G.tvLastInst    = null;
@@ -1148,7 +965,7 @@ function _barFloor(unixSec, tfMin){
   return Math.floor(unixSec / (tfMin*60)) * (tfMin*60);
 }
 
-function pushTickToChart(price, ts /* ms */, inst){
+function pushTickToChart(price, ts, inst){
   inst = inst || G.inst;
   const tf  = G.chartTf || 1;
   const sec = Math.floor((ts || Date.now()) / 1000);
@@ -1181,30 +998,22 @@ function pushTickToChart(price, ts /* ms */, inst){
 function mountChart(){
   const host = document.getElementById('tvChart');
   if(!host) return;
-  const symLbl = document.getElementById('tvSymLbl'); if(symLbl) symLbl.textContent = G.inst;
-  // Library still loading? show a tiny notice and retry shortly.
   if(!window.LightweightCharts){
     host.innerHTML = '<div style="padding:24px;color:var(--dim);font-size:12px;text-align:center">Loading chart engine…</div>';
     setTimeout(mountChart, 250);
     return;
   }
-  // Tear down any existing chart before remounting (timeframe / mode / inst swap).
   host.innerHTML = '';
   G.tvChart = LightweightCharts.createChart(host, {
     width:  host.clientWidth,
     height: 300,
-    layout: {background:{type:'solid', color:'#000000'}, textColor:'#9c9c9c', fontFamily:'-apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", sans-serif'},
+    layout: {background:{type:'solid', color:'#000000'}, textColor:'#9c9c9c', fontFamily:'-apple-system, BlinkMacSystemFont, sans-serif'},
     grid:   {vertLines:{color:'#1c1c1c'}, horzLines:{color:'#1c1c1c'}},
     rightPriceScale: {borderColor:'#1c1c1c'},
     timeScale:       {borderColor:'#1c1c1c', timeVisible:true, secondsVisible:false},
     crosshair:       {mode: LightweightCharts.CrosshairMode.Normal},
-    handleScroll:    {mouseWheel:true, pressedMouseMove:true, horzTouchDrag:true},
-    handleScale:     {axisPressedMouseMove:true, mouseWheel:true, pinch:true},
   });
   const bars = G.chartBars[G.inst] || [];
-  // Pick series shape from G.chartMode. The session direction (up/down)
-  // tints the area-mode gradient so a flat market shows neutral, a
-  // rising market gets a mint fill, falling gets coral.
   const upSession = bars.length ? (bars[bars.length-1].close >= bars[0].open) : true;
   if(G.chartMode === 'area'){
     G.tvSeries = G.tvChart.addAreaSeries({
@@ -1226,13 +1035,6 @@ function mountChart(){
     if(bars.length) G.tvSeries.setData(bars);
   }
   G.tvLastInst = G.inst;
-  // Intentionally NOT seeding the chart from G.spot. The previous behaviour
-  // pushed a synthetic point at whatever spot we currently held — which is
-  // the placeholder default (0 / 24350 / 80000) before any real Kotak
-  // tick has arrived. The first real tick would then draw a giant bar
-  // from the placeholder to the live price (the "fake red drop" in the
-  // user's screenshot). Chart now stays blank until the first real tick.
-  // Responsive resize.
   if(G._tvRO) G._tvRO.disconnect();
   G._tvRO = new ResizeObserver(()=>{
     if(G.tvChart) G.tvChart.applyOptions({width: host.clientWidth, height: 300});
@@ -1240,7 +1042,6 @@ function mountChart(){
   G._tvRO.observe(host);
 }
 
-// Toggle between area (gradient line, default) and OHLC candles.
 function toggleChartMode(){
   G.chartMode = (G.chartMode === 'area') ? 'candles' : 'area';
   const chip = document.getElementById('modeChip');
@@ -1254,7 +1055,6 @@ function setChartTf(btn, m){
   G.chartTf = m;
   document.querySelectorAll('[data-tvtf]').forEach(b=>b.classList.remove('btn-b'));
   if(btn) btn.classList.add('btn-b');
-  // Re-bucket existing bars at the new TF by replaying close prices.
   const flat = (G.chartBars[G.inst] || []).map(b => [b.time*1000, b.close]);
   G.chartBars[G.inst] = [];
   for(const [ts, p] of flat) pushTickToChart(p, ts);
@@ -1262,7 +1062,6 @@ function setChartTf(btn, m){
 }
 
 async function buildChain(){
-  // No session yet → local Black-Scholes synth so the UI is non-blank.
   if(!G.sid){
     const inst=G.inst,sp=G.spot[inst],step=inst==='SENSEX'?100:50;
     const atm=Math.round(sp/step)*step,T=dte(),r=.065;
@@ -1278,7 +1077,6 @@ async function buildChain(){
     return;
   }
 
-  // Throttle: serve cached chain if it was refreshed less than chainTtlMs ago.
   const now = Date.now();
   if(G.chain.length && (now - G.lastChainFetch) < G.chainTtlMs){
     _renderChain();
@@ -1297,12 +1095,10 @@ async function buildChain(){
       }));
       G.chainExpiry    = r.expiry || '';
       G.lastChainFetch = now;
-      log('✓ REAL chain — '+G.chain.length+' strikes around ATM '+r.atm+(r.expiry?' exp='+r.expiry:''),'success');
-    } else if(r && !r.success){
-      log('Chain fetch returned no data: '+(r.error||'?')+' — keeping prior chain.','warn');
+      log('✓ REAL chain — '+G.chain.length+' strikes around ATM '+r.atm,'success');
     }
   }catch(e){
-    log('Chain fetch error: '+e.message+' — keeping prior chain.','warn');
+    log('Chain fetch error: '+e.message,'warn');
   }finally{
     G.chainBusy = false;
     _renderChain();
@@ -1316,15 +1112,14 @@ function selRow(i){
   const sl=parseFloat(document.getElementById('slS').value);
   document.getElementById('oStrike').textContent=row.strike;
   document.getElementById('ceLtp').textContent='₹'+row.ce.ltp;
-  document.getElementById('ceIv').textContent='IV: '+row.ce.iv+'%';
+  document.getElementById('ceIv').textContent='IV: —%';
   document.getElementById('peLtp').textContent='₹'+row.pe.ltp;
-  document.getElementById('peIv').textContent='IV: '+row.pe.iv+'%';
+  document.getElementById('peIv').textContent='IV: —%';
   document.getElementById('oSumm').textContent=`${lots}L × ${lsz} = ${lots*lsz} qty | TP:${tp}% SL:${sl}%`;
   const ai=document.getElementById('aiRec');
   if(G.sig?.direction&&G.sig.direction!=='WAIT'){ai.style.display='block';ai.textContent='AI recommends: '+G.sig.direction+' ('+G.sig.confidence+'% confidence)';}
   else ai.style.display='none';
   document.getElementById('orderBox').style.display='block';
-  log('Strike '+row.strike+' selected','info');
 }
 
 function onInst(){
@@ -1332,19 +1127,14 @@ function onInst(){
   selectIndex(G.inst);
 }
 
-// Click handler for the top market-indices cards. Single source of truth
-// for instrument switching — buildChain, chart re-mount, dropdown sync,
-// market-card visual state, snapshot card all driven from here.
 function selectIndex(name){
   G.inst = name;
-  // Sync the dropdown if its value differs.
   const sel = document.getElementById('inst');
   if(sel && sel.value !== name) sel.value = name;
   document.getElementById('lsLbl').textContent = LS[G.inst];
   G.selRow = null;
   const ob = document.getElementById('orderBox'); if(ob) ob.style.display = 'none';
   G.lastChainFetch = 0;
-  // Symbol header text.
   const meta = {
     NIFTY:  {sub:'Nifty 50 · NSE'},
     SENSEX: {sub:'BSE Sensex · BSE'},
@@ -1353,19 +1143,12 @@ function selectIndex(name){
   const symSub  = document.getElementById('symSub');
   if(symName) symName.textContent = G.inst;
   if(symSub)  symSub.textContent  = (meta[G.inst]?.sub) || G.inst;
-  // Market-card active state.
   document.querySelectorAll('.mi').forEach(el => el.classList.toggle('active', el.id === 'mi-'+G.inst));
-  // Refresh visuals.
   buildChain();
   mountChart();
   updateSnapshot();
 }
 
-// Fill the symbol header + green/red change chip. Called every quote
-// tick. `ref` is Kotak's reference (prev_close preferred, else session
-// open) — absolute delta is computed against that, not against the
-// first tick we saw on this page. If we don't have a real tick yet
-// (ltp <= 0), render "—" instead of fake ₹0.00.
 function updateSymbolHeader(ltp, chgPct, ref){
   const px = document.getElementById('symPx');
   const ch = document.getElementById('symCh');
@@ -1390,8 +1173,6 @@ function updateSymbolHeader(ltp, chgPct, ref){
   }
 }
 
-// Today's-range slider + open/spot pair. Driven by /quotes/market_data
-// response which carries open / high / low / change.
 function updateSnapshot(){
   const md = G.marketData[G.inst] || {};
   const o  = +(md.open || 0);
@@ -1411,8 +1192,6 @@ function updateSnapshot(){
   }
 }
 
-// Populate one market-indices card. Called for both NIFTY and SENSEX so
-// both cards stay live regardless of which one is active.
 function paintMiCard(name, ltp, chgPct){
   const px = document.getElementById('mi-'+name+'-px');
   const ch = document.getElementById('mi-'+name+'-ch');
@@ -1424,15 +1203,6 @@ function paintMiCard(name, ltp, chgPct){
   ch.style.color = up ? 'var(--green)' : 'var(--red)';
 }
 
-// Fetch the OTHER index's spot in the background so its card stays live
-// even while we're focused on G.inst. Costs one extra /quotes/market_data
-// call per 5 s tick — well inside the 600/min general rate cap.
-// ── TECHNICAL INDICATORS (client-side from chart bars) ────────────────────
-// Computed on every quote tick from the bar buffer the chart already
-// maintains. Pure JS — no extra API calls. The qualitative chips in the
-// AI Signal Engine card remain (driven by Claude); these numbers expose
-// the underlying values a pro trader looks at: RSI, MACD, EMA9/EMA20,
-// VWAP-style mid, plus ATM CE+PE OI and Volume from Kotak.
 function _ema(values, period){
   if(values.length < period) return null;
   const k = 2 / (period + 1);
@@ -1464,8 +1234,6 @@ function _macd(values){
   return e12 - e26;
 }
 function _vwap(bars){
-  // True VWAP needs volume. We approximate with a typical-price simple
-  // average across the session bars — close enough for direction.
   if(!bars.length) return null;
   let acc = 0;
   for(const b of bars){ acc += (b.high + b.low + b.close) / 3; }
@@ -1489,11 +1257,9 @@ function refreshTechnicals(){
   if($('tech-ema9')) $('tech-ema9').textContent = ema9  != null ? ema9.toFixed(2)  : '—';
   if($('tech-ema20'))$('tech-ema20').textContent= ema20 != null ? ema20.toFixed(2) : '—';
   if($('tech-vwap')) $('tech-vwap').textContent = vwap  != null ? vwap.toFixed(2)  : '—';
-  // RSI colour: >70 overbought (red), <30 oversold (green), else neutral.
   if($('tech-rsi') && rsiV != null){
     $('tech-rsi').style.color = rsiV > 70 ? 'var(--red)' : rsiV < 30 ? 'var(--green)' : 'var(--bright)';
   }
-  // MACD-based action — most popular pro-trader signal.
   if($('tech-mAction')){
     if(macdV == null){
       $('tech-mAction').textContent = '—';
@@ -1506,24 +1272,17 @@ function refreshTechnicals(){
       $('tech-mAction').style.color = 'var(--red)';
     }
   }
-  // Vote-based overall bias verdict (RSI + MACD + EMA cross + spot/VWAP).
   let votes = 0;
   if(rsiV  != null) votes += (rsiV  > 55 ? 1 : (rsiV  < 45 ? -1 : 0));
   if(macdV != null) votes += (macdV >  0 ? 1 : (macdV <  0 ? -1 : 0));
   if(ema9  != null && ema20 != null) votes += (ema9 > ema20 ? 1 : -1);
   if(spot && vwap) votes += (spot > vwap ? 1 : -1);
-  const bias = votes >=  2 ? 'BULLISH · CE'
-             : votes <= -2 ? 'BEARISH · PE'
-             :              'NEUTRAL';
-  const c = votes >=  2 ? 'var(--green)'
-          : votes <= -2 ? 'var(--red)'
-          :              'var(--dim)';
+  const bias = votes >=  2 ? 'BULLISH · CE' : votes <= -2 ? 'BEARISH · PE' : 'NEUTRAL';
+  const c = votes >=  2 ? 'var(--green)' : votes <= -2 ? 'var(--red)' : 'var(--dim)';
   if($('tech-bias'))    { $('tech-bias').textContent    = bias; $('tech-bias').style.color = c; }
   if($('techVerdict'))  { $('techVerdict').textContent  = bias; $('techVerdict').style.color = c; $('techVerdict').style.borderColor = c; }
 }
 
-// ATM OI + Volume poller — calls the new /quotes/option_full backend
-// every 20 s while the SIGNAL tab is in focus. PCR = peOi / ceOi.
 G._techIv = null;
 async function refreshAtmOiVol(){
   if(!G.sid || !G.chain || !G.chain.length) return;
@@ -1556,9 +1315,8 @@ async function refreshAtmOiVol(){
       $('tech-pcr').textContent = pcr != null ? pcr.toFixed(2) : '—';
       $('tech-pcr').style.color = pcr == null ? 'var(--dim)' : pcr > 1.2 ? 'var(--green)' : pcr < 0.8 ? 'var(--red)' : 'var(--bright)';
     }
-  }catch(_){ /* silent — the chip stays at last value */ }
+  }catch(_){}
 }
-// Kick off the periodic refresh once. Mounted at module load.
 function _startTechLoop(){
   if(G._techIv) clearInterval(G._techIv);
   refreshAtmOiVol();
@@ -1574,22 +1332,16 @@ async function fetchOtherIndex(){
       G.spot[other] = r.ltp;
       paintMiCard(other, r.ltp, r.change || 0);
     }
-  }catch(_){ /* don't spam log; one failed background fetch is fine */ }
+  }catch(_){}
 }
 function chgLots(d){G.lots=Math.max(1,Math.min(10,G.lots+d));document.getElementById('lotsV').textContent=G.lots;}
 
-// ── PLACE ORDER ───────────────────────────────────────────────────────────
-// Live trade entry. The displayed option chain in this app is a local
-// Black-Scholes approximation (no real Kotak symbols), so right before
-// placing the order we call /chain/resolve_strike to swap in the actual
-// p_trd_symbol + p_symbol + LTP from Kotak's scrip master. The resolved
-// p_symbol is persisted on the trade so the monitor can poll real LTPs.
-async function placeOrder(side,rowOvr){
+async function placeOrder(side,rowOvr,lotsOverride){
   const row=rowOvr||G.selRow; if(!row){log('Select a strike.','warn');return;}
-  const qty=G.lots*LS[G.inst];
+  const activeLots = lotsOverride || G.lots;
+  const qty=activeLots*LS[G.inst];
   const tid='T'+Date.now();
 
-  // ── STEP 1/5 — resolve strike to real Kotak contract ──
   let resolved = null;
   if(G.sid){
     log('STEP 1/5 resolve_strike → '+G.inst+' '+row.strike+side+' …','info');
@@ -1599,10 +1351,10 @@ async function placeOrder(side,rowOvr){
         log('STEP 1/5 FAIL — resolve_strike: '+(resolved.error||'?'),'error');
         return;
       }
-      log('STEP 1/5 OK — ts='+resolved.p_trd_symbol+' p_sym='+resolved.p_symbol+' ltp=₹'+resolved.ltp+' exp='+(resolved.expiry||'?'),'success');
+      log('STEP 1/5 OK — ts='+resolved.p_trd_symbol+' p_sym='+resolved.p_symbol+' ltp=₹'+resolved.ltp,'success');
     }catch(e){log('STEP 1/5 ERR — '+e.message,'error'); return;}
   }
-  // Real values from Kotak (paper-mode falls back to chain UI values).
+  
   const ltp        = resolved ? resolved.ltp                          : parseFloat(side==='CE'?row.ce.ltp:row.pe.ltp);
   const realSymbol = resolved ? resolved.p_trd_symbol                 : (G.inst+row.strike+side);
   const pSymbol    = resolved ? resolved.p_symbol                     : null;
@@ -1610,7 +1362,6 @@ async function placeOrder(side,rowOvr){
   const tp = +(ltp*(1+parseFloat(document.getElementById('tpS').value)/100)).toFixed(2);
   const sl = +(ltp*(1-parseFloat(document.getElementById('slS').value)/100)).toFixed(2);
 
-  // ── STEP 2/5 — pre-trade risk check ──
   if(G.sid){
     try{
       const rc=await api('/risk/check',{required_margin: ltp*qty});
@@ -1623,8 +1374,6 @@ async function placeOrder(side,rowOvr){
   }
 
   log(`STEP 3/5 sending to Kotak: BUY ${qty}×${realSymbol} @ MKT | Entry ₹${ltp.toFixed(2)} | TP:${tp} SL:${sl}`,'trade');
-  // Gates before sending to Kotak. TEST ORDER must have succeeded
-  // (G.orderAuthVerified) and the quote stream must be healthy.
   let liveOrdNo = null;
   if(G.sid && !G.orderAuthVerified){
     log('🛑 LIVE TRADE BLOCKED — order auth not verified. Run TEST ORDER once (LOG tab) to unlock. Tracking as PAPER trade.','error');
@@ -1640,63 +1389,32 @@ async function placeOrder(side,rowOvr){
       } else {
         const code = res.stCode || res.errCode || res.code;
         const msg  = res.emsg || res.errMsg || res.message || res.error || 'unknown';
-        let hint = '';
-        if(code === 100008 || /unauthor/i.test(msg)){
-          hint = ' — likely cause: IP whitelist OR F&O segment not active on Kotak account. See email draft.';
-        } else if(/margin/i.test(msg)){
-          hint = ' — likely cause: insufficient margin. Check WALLET.';
-        } else if(/closed|hours|session/i.test(msg)){
-          hint = ' — market session may be closed.';
-        } else if(/symbol|scrip|instrument/i.test(msg)){
-          hint = ' — bad trading symbol. Rebuild chain.';
-        }
-        log('STEP 5/5 ✗ Order error '+(code?'['+code+'] ':'')+msg+hint,'error');
-        // Dump the per-step backend trace so the user can see exactly which
-        // phase failed inside the FastAPI handler (pre / http_response /
-        // parsed / transport_error).
-        if(res.debug){
-          log('Backend trace: '+JSON.stringify(res.debug).substring(0,500),'warn');
-        }
-        return; // do NOT create a local trade if Kotak rejected
+        log('STEP 5/5 ✗ Order error '+(code?'['+code+'] ':'')+msg,'error');
+        return;
       }
     }catch(e){log('STEP 5/5 ✗ Order failed: '+e.message,'error'); return;}
   }else log('[NO KOTAK SESSION] Tracked locally.','warn');
 
   const trade={
-    id:tid, symbol:realSymbol, side, qty, lots:G.lots,
+    id:tid, symbol:realSymbol, side, qty, lots:activeLots,
     entryPrice:ltp, currentLTP:ltp, tp, sl,
     pnl:0, pnlPct:0,
     entry:new Date().toLocaleTimeString('en-IN',{hour12:false}),
     status:'OPEN',
-    pSymbol,             // for /quotes/option_ltp polling
-    exchSeg,             // for the matching SELL on exit (nse_fo / bse_fo)
+    pSymbol,
+    exchSeg,
     entryOrdNo: liveOrdNo,
-    isPaper: !liveOrdNo, // paper trades fall back to simulated drift
-    // Trailing stop-loss state:
+    isPaper: !liveOrdNo,
     initialSL:   sl,
     initialTP:   tp,
-    maxLTP:      ltp,    // running peak — used to ratchet the trailing SL
-    trailStage:  0       // 0=none, 1=moved-to-cost (after 1:1 RR), 2=trailing
+    maxLTP:      ltp,
+    trailStage:  0
   };
   G.open.push(trade); G.selRow=null;
   document.getElementById('orderBox').style.display='none';
   startMon(trade); render(); gt('orders');
 }
 
-// LIVE_MONITOR_READY: when true, live trades (real Kotak orders) are
-// allowed. startMon below polls /quotes/option_ltp every ~3 s and exits
-// via a real SELL on TP/SL. Paper trades (trade.isPaper === true) still
-// fall back to simulated drift so users can dry-run without a live
-// session.
-const LIVE_MONITOR_READY = true;
-
-// ── MONITOR ───────────────────────────────────────────────────────────────
-// Polls the real Kotak option LTP every ~3 s while the position is open.
-// Tolerates transient LTP fetch failures (up to MON_FAIL_TOL in a row)
-// before alerting — a single failed poll must not trigger an exit. On
-// TP/SL hit, exitT() places a real SELL @ MKT to close the position.
-const MON_POLL_MS  = 3000;
-const MON_FAIL_TOL = 4;     // ~12 s of consecutive failures before alert
 function startMon(trade){
   if(mon[trade.id]) return;
   trade._failStreak = 0;
@@ -1704,12 +1422,10 @@ function startMon(trade){
     const t=G.open.find(x=>x.id===trade.id);
     if(!t){clearInterval(mon[trade.id]);return;}
 
-    // Paper trade: keep the legacy simulated drift so dry-run still works.
     if(t.isPaper || !t.pSymbol || !G.sid){
       const drift=(Math.random()-.47)*t.entryPrice*.025;
       t.currentLTP=Math.max(.05,(t.currentLTP||t.entryPrice)+drift);
     } else {
-      // Live trade: poll the real Kotak LTP for this option contract.
       try{
         const r = await api('/quotes/option_ltp',{session_id:G.sid, p_symbol:t.pSymbol, exchange:(t.exchSeg||'nse_fo')});
         if(r.ok && r.ltp > 0){
@@ -1717,17 +1433,14 @@ function startMon(trade){
           t._failStreak = 0;
         } else {
           t._failStreak += 1;
-          if(t._failStreak === MON_FAIL_TOL){
-            log('⚠ MONITOR STALE on '+t.symbol+': '+MON_FAIL_TOL+' consecutive LTP fetch failures ('+(r.error||'?')+'). Holding position; TP/SL paused until LTP returns.','warn');
+          if(t._failStreak === 4){
+            log('⚠ MONITOR STALE on '+t.symbol+': multiple failures. Pausing exits.','warn');
           }
-          // Do NOT update currentLTP, do NOT trigger exits on stale data.
           render(); return;
         }
       }catch(e){
         t._failStreak += 1;
-        if(t._failStreak === MON_FAIL_TOL){
-          log('⚠ MONITOR ERROR on '+t.symbol+': '+e.message+'. Holding position.','warn');
-        }
+        if(t._failStreak === 4){ log('⚠ MONITOR ERROR on '+t.symbol+': '+e.message,'warn'); }
         render(); return;
       }
     }
@@ -1735,26 +1448,15 @@ function startMon(trade){
     t.pnl=(t.currentLTP-t.entryPrice)*t.qty;
     t.pnlPct=((t.currentLTP-t.entryPrice)/t.entryPrice)*100;
 
-    // ── TRAILING STOP LOSS ────────────────────────────────────────────
-    // Two-stage trail per spec:
-    //   stage 1: at 1:1 RR (profit ≥ initial risk) → move SL to entry (cost).
-    //            "Free trade" — worst case is break-even.
-    //   stage 2: beyond 1:1 → trail SL at max(running peak − 1× initial risk,
-    //            current SL). Locks in profit as price advances; never moves
-    //            backward (one-way ratchet).
-    // We track the running peak (t.maxLTP) so a wick high is captured even
-    // if it doesn't last to the next tick.
     if(t.currentLTP > t.maxLTP) t.maxLTP = t.currentLTP;
-    const initialRisk  = t.entryPrice - t.initialSL;   // CE long: positive
+    const initialRisk  = t.entryPrice - t.initialSL;
     const profitVsRisk = t.currentLTP - t.entryPrice;
     if(initialRisk > 0){
       if(t.trailStage === 0 && profitVsRisk >= initialRisk){
-        // 1:1 RR reached → SL to cost.
         t.sl = t.entryPrice;
         t.trailStage = 1;
-        log('⤴ Trailing SL → cost (1:1 RR) on '+t.symbol+' @ ₹'+t.entryPrice.toFixed(2),'info');
+        log('Trailing SL → cost on '+t.symbol+' @ ₹'+t.entryPrice.toFixed(2),'info');
       } else if(t.trailStage >= 1){
-        // Trail at peak − initialRisk; only ratchet up, never down.
         const candidate = t.maxLTP - initialRisk;
         if(candidate > t.sl){
           t.sl = +candidate.toFixed(2);
@@ -1763,8 +1465,6 @@ function startMon(trade){
       }
     }
 
-    // ── HARD AUTO-EXIT BEFORE MARKET CLOSE (spec: no overnight) ──────
-    // 15:20 IST cutoff. If we're past it, exit at market price right now.
     if(_istMins() >= AUTO_EXIT_MIN){
       clearInterval(mon[trade.id]);
       log('🕒 AUTO-EXIT 15:20 cutoff hit on '+t.symbol+' — closing now','warn');
@@ -1775,15 +1475,10 @@ function startMon(trade){
     if(t.currentLTP<=t.sl){clearInterval(mon[trade.id]);exitT(t,'LOSS',t.currentLTP);return;}
     render();
   };
-  // Fire once immediately so the user sees a fresh LTP on the trade row.
   poll();
-  mon[trade.id]=setInterval(poll, MON_POLL_MS);
+  mon[trade.id]=setInterval(poll, 3000);
 }
 
-// On TP/SL hit: place a real SELL @ MKT to close the position. If the
-// SELL fails (network, margin, market-hours), leave the trade OPEN and
-// alert — never mark a position closed locally while the broker still
-// shows it as live.
 async function exitT(trade,res,ex){
   let exitOrdNo = null;
   if(!trade.isPaper && G.sid && trade.symbol){
@@ -1799,14 +1494,13 @@ async function exitT(trade,res,ex){
       } else {
         const code = er.stCode || er.errCode || er.code;
         const msg  = er.emsg || er.errMsg || er.message || er.error || 'unknown';
-        log('🚨 EXIT FAILED for '+trade.symbol+' '+(code?'['+code+'] ':'')+msg+' — position STILL OPEN at broker. Manual exit required.','error');
-        // Restart the monitor so we keep watching the live position.
+        log('🚨 EXIT FAILED for '+trade.symbol+' ['+code+'] '+msg+' — Manual exit required.','error');
         delete mon[trade.id];
         startMon(trade);
         return;
       }
     }catch(e){
-      log('🚨 EXIT NETWORK ERROR for '+trade.symbol+': '+e.message+' — position STILL OPEN at broker. Manual exit required.','error');
+      log('🚨 EXIT NETWORK ERROR for '+trade.symbol+' — Manual exit required.','error');
       delete mon[trade.id];
       startMon(trade);
       return;
@@ -1820,21 +1514,16 @@ async function exitT(trade,res,ex){
   log(`${res==='WIN'?'✓ TARGET':'✗ SL HIT'}: ${trade.symbol} | Exit ₹${ex.toFixed(2)} | P&L ₹${pnl.toFixed(0)}`,res==='WIN'?'success':'error');
   render(); stats();
 
-  // Push booked PnL into the risk engine and refresh the wallet from Kotak
-  // so avlMrgn reflects the post-settlement balance. If a daily cap fires
-  // we stop the bot immediately.
   if(G.sid){
     try{
       const rb=await api('/risk/book',{pnl});
       const st=rb.state||{};
-      const pct=(st.realised_pnl_pct||0).toFixed(2);
-      log(`Day P&L ₹${(st.realised_pnl||0).toFixed(0)} (${pct}%) | Trades:${st.trades_today} W:${st.wins_today} L:${st.losses_today}`,'info');
       if(st.halted){
         log('🛑 RISK ENGINE HALTED: '+st.halted_reason,'error');
         if(G.botOn) stopBot();
       }
-    }catch(e){log('Risk book error: '+e.message,'warn');}
-    fetchWallet();  // refresh avlMrgn (settlement may lag a few seconds)
+    }catch(e){}
+    fetchWallet();
   }
 }
 
@@ -1863,21 +1552,11 @@ function stats(){
   document.getElementById('sOpen').textContent=G.open.length;
 }
 
-// ── FAST LOCAL LEAN ───────────────────────────────────────────────────────
-// Mirrors the LLM's scoring math but runs purely client-side using the
-// freshest tick data. Called every quote tick (~5 s) so the big SIG number
-// always reflects current market within seconds, rather than waiting up to
-// 30 s for the next Claude analyze. The LLM call still happens on the
-// slower cycle and overwrites quickLean's output with its (richer)
-// reasoning + per-indicator labels.
-//
-// Math identical to the prompt's tiebreaker stack so the two paths cannot
-// diverge in direction.
 function quickLean(forceRender){
   const md = G.marketData[G.inst] || {};
   const spot = G.spot[G.inst] || 0;
-  const chg  = +(md.change || 0);          // intraday change %
-  const mom  = +(md.momentum_5m || 0);      // 5-min momentum %
+  const chg  = +(md.change || 0);
+  const mom  = +(md.momentum_5m || 0);
   const open = +(md.open || 0);
   const high = +(md.high || 0);
   const low  = +(md.low  || 0);
@@ -1885,7 +1564,6 @@ function quickLean(forceRender){
   const news = +(G.news?.sentiment_score ?? 0);
   const ticks = md.ticks_count || 0;
 
-  // Saturating contributions in [-1..+1].
   const clamp = (x,a,b) => Math.max(a, Math.min(b, x));
   const c1 = 0.40 * clamp(chg / 0.10, -1, 1);
   const c2 = 0.30 * clamp(mom / 0.05, -1, 1);
@@ -1896,12 +1574,7 @@ function quickLean(forceRender){
   const c5 = 0.10 * clamp(news, -1, 1);
   let score = c1 + c2 + c3 + c4 + c5;
 
-  let dir;
-  if(score > 0)       dir = 'CE';
-  else if(score < 0)  dir = 'PE';
-  else                dir = (news >= 0 ? 'CE' : 'PE');
-
-  // Confidence with VIX risk-off penalty + low-tick cap.
+  let dir = score > 0 ? 'CE' : score < 0 ? 'PE' : (news >= 0 ? 'CE' : 'PE');
   let conf = 50 + Math.round(Math.abs(score) * 45);
   if(vix > 22)      conf = 50 + Math.round((conf - 50) * 0.50);
   else if(vix > 18) conf = 50 + Math.round((conf - 50) * 0.70);
@@ -1909,39 +1582,19 @@ function quickLean(forceRender){
   else if(ticks < 6) conf = Math.min(conf, 65);
   conf = Math.max(50, Math.min(95, conf));
 
-  // Only repaint if we have something to say or the caller insists.
-  if(!forceRender && (!G.sig || G.sig._fromClaude) && Math.abs(score) < 0.02 && ticks < 3){
-    return;
-  }
+  if(!forceRender && (!G.sig || G.sig._fromClaude) && Math.abs(score) < 0.02 && ticks < 3) return;
+
   const de=document.getElementById('sigDir');
-  if(de){
-    de.textContent = dir;
-    de.className   = 'sig-big '+(dir==='CE'?'sig-ce':'sig-pe');
-  }
+  if(de){ de.textContent = dir; de.className = 'sig-big '+(dir==='CE'?'sig-ce':'sig-pe'); }
   const cf=document.getElementById('cFill');
-  if(cf){
-    cf.style.width = conf+'%';
-    cf.style.background = dir==='CE'?'var(--green)':'var(--red)';
-  }
+  if(cf){ cf.style.width = conf+'%'; cf.style.background = dir==='CE'?'var(--green)':'var(--red)'; }
   const sb=document.getElementById('sigBadge');
-  if(sb){
-    sb.textContent = dir+' · '+conf+'% · FAST';
-    sb.className   = 'badge '+(dir==='CE'?'bg':'br');
-  }
+  if(sb){ sb.textContent = dir+' · '+conf+'% · FAST'; sb.className = 'badge '+(dir==='CE'?'bg':'br'); }
   const sr=document.getElementById('sigReason');
-  if(sr){
-    sr.textContent =
-      `Local lean: chg ${chg.toFixed(3)}% · mom ${mom.toFixed(3)}% · ` +
-      `${spot >= mid ? 'above':'below'} mid · VIX ${vix.toFixed(2)} · news ${news.toFixed(2)} ` +
-      `→ score ${score.toFixed(2)} · bias ${_biasBucket(score)}`;
-  }
-  // Keep G.sig fresh for the auto-trade dispatcher. Mark this read as
-  // "from local lean" so the next Claude analyze can overwrite cleanly.
+  if(sr){ sr.textContent = `Local score ${score.toFixed(2)} · bias ${_biasBucket(score)}`; }
   G.sig = {direction: dir, confidence: conf, score, bias: _biasBucket(score), _fromQuickLean: true, _ts: Date.now()};
 }
 
-// 5-bucket bias bucket from the unified [-1..+1] score. Used by quickLean,
-// dispatchAutoTrade (the NEUTRAL bucket auto-skips trades), and the UI badge.
 function _biasBucket(score){
   if(score >=  0.55) return 'STRONG_BULLISH';
   if(score >=  0.20) return 'BULLISH';
@@ -1950,16 +1603,10 @@ function _biasBucket(score){
   return 'NEUTRAL';
 }
 
-// ── AI ANALYZE ────────────────────────────────────────────────────────────
 async function analyze(){
   const key=document.getElementById('cKey').value.trim();
   if(!key){log('Enter Claude API key.','warn');return;}
 
-  // Market-hours guard. NSE is open 09:15–15:30 IST, Mon–Fri.
-  // During off-hours Kotak streams the previous day's close as a frozen
-  // LTP, so change/momentum are always 0 and Claude correctly outputs WAIT
-  // for every analysis. Refuse to run rather than burn API calls + show
-  // a misleading "Analysis complete" line.
   const mkt = marketStatus();
   if(!mkt.open){
     document.getElementById('sigDir').textContent='CLOSED';
@@ -1967,7 +1614,6 @@ async function analyze(){
     document.getElementById('sigReason').textContent=mkt.reason;
     const sb=document.getElementById('sigBadge');
     sb.textContent='MARKET CLOSED'; sb.className='badge bd';
-    log('Market closed — '+mkt.reason+'. Skipping AI analysis.','warn');
     return;
   }
 
@@ -1977,10 +1623,6 @@ async function analyze(){
   document.getElementById('sigDir').className='sig-big sig-idle';
   log('Sending data to Claude AI...','info');
   const s=G.spot[G.inst];
-  // Pull REAL fields from /quotes/market_data — open/high/low/change are
-  // derived server-side from the session tick history (see ticks.py). No
-  // more random fallbacks; if the field is missing we send 0 and the prompt
-  // makes that explicit to Claude.
   const md_real = G.marketData[G.inst] || {};
   const realOpen   = md_real.open    || 0;
   const realHigh   = md_real.high    || 0;
@@ -2000,25 +1642,18 @@ async function analyze(){
     vix:  realVix.toFixed(2),
     ticks_observed: ticksCount,
     time: new Date().toLocaleTimeString('en-IN',{hour12:false}),
-    data_source: md_real.source || (md_real.ltp ? 'REAL_KOTAK_API' : 'SIMULATED')
+    data_source: md_real.source || 'SIMULATED'
   };
-  log(`Sending to Claude: chg=${md.intraday_change_pct}% mom5m=${md.momentum_5m_pct}% ticks=${md.ticks_observed} vix=${md.vix}`,'info');
 
-  // Local tick-freshness guard — short-circuits before the LLM call.
-  // Threshold dropped from 6 → 3 so we get a directional read in ~15 s
-  // after first tick instead of ~30 s. Below 3 ticks momentum is too
-  // noisy to lean either way; we publish the local quickLean direction
-  // as a placeholder and skip the Claude round-trip.
   if(ticksCount < 3){
-    quickLean(/*forceRender=*/true);
-    log(`Warmup — ${ticksCount}/3 ticks; using local quickLean, skipped Claude call.`,'warn');
+    quickLean(true);
+    log(`Warmup — ${ticksCount}/3 ticks; skipped Claude call.`,'warn');
     btn.disabled=false; btn.textContent='⟳ ANALYZE NOW';
     return;
   }
 
   try{
-    const res=await fetch(CLAUDE,{method:'POST',headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:500,messages:[{role:'user',content:`You are an expert NSE F&O intraday options trader. Decide whether to buy a CE (bullish), buy a PE (bearish), or WAIT, based on the REAL price action below. Work from price action ONLY — do not fabricate readings.
-
+    const res=await fetch(CLAUDE,{method:'POST',headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:500,messages:[{role:'user',content:`Analyze option parameters.
 Instrument: ${md.instrument}
 Spot LTP: ${md.spot}
 Session Open / High / Low: ${md.open} / ${md.high} / ${md.low}
@@ -2028,72 +1663,25 @@ India VIX: ${md.vix}
 Ticks observed this session: ${md.ticks_observed}
 Time: ${md.time}
 Data source: ${md.data_source}
-News sentiment (-1 bearish .. +1 bullish): ${G.news?.sentiment_score ?? 'n/a'}
-Recent headlines: ${(G.news?.headlines||[]).slice(0,5).join(' | ') || 'n/a'}
+News sentiment: ${G.news?.sentiment_score ?? '0.0'}
 
-Direction rules — ALWAYS pick CE or PE. WAIT is only valid when ticks_observed < 3.
-Build a directional score in [-1..+1] by adding each signal's contribution; positive => CE, negative => PE.
-
-  signal               contribution
-  intraday change      +0.40 × clamp(change_pct / 0.10, -1, +1)     (saturates at ±0.10%)
-  5-min momentum       +0.30 × clamp(momentum_5m_pct / 0.05, -1, +1)
-  spot vs midrange     +0.10 × clamp((spot - (high+low)/2) / max(0.0001, spot*0.0008), -1, +1)
-  spot vs session open +0.10 × sign(spot - open)
-  news sentiment       +0.10 × clamp(news_sentiment, -1, +1)
-
-Direction:
-- score > 0  -> CE
-- score < 0  -> PE
-- score == 0 (extremely rare) -> pick CE if news_sentiment >= 0 else PE.
-
-Five-bucket BIAS (return in `bias` field alongside `direction`):
-  score >=  0.55  -> "STRONG_BULLISH"  (high-conviction CE only)
-  score in 0.20..0.55 -> "BULLISH"
-  score in -0.20..0.20 -> "NEUTRAL"     (the auto-trader will skip)
-  score in -0.55..-0.20 -> "BEARISH"
-  score <= -0.55  -> "STRONG_BEARISH"   (high-conviction PE only)
-
-Confidence (50..95):
-- base = 50 + round(|score| * 45)
-- VIX risk-off penalty: if VIX > 18, multiply (base - 50) by 0.70 then add 50; if VIX > 22, multiply by 0.50.
-- Cap at 95.
-- ticks_observed in [3..5] => cap confidence at 60 (still emit direction, just low conviction).
-
-Reasoning must cite the actual numbers (change, momentum, news_sentiment, vix) — never fabricate.
-
-For the per-indicator fields, derive each from the real price action (no
-fabrication — base every label on the numbers above):
-- rsi_signal:  BULLISH if change > +0.2%, BEARISH if change < -0.2%, else NEUTRAL.
-- macd_signal: BULLISH if 5-min momentum > +0.03%, BEARISH if < -0.03%, else NEUTRAL.
-- ema_signal:  BULLISH if spot > (high+low)/2 by >0.05%, BEARISH if below by >0.05%, else NEUTRAL.
-- vwap_signal: BULLISH if spot > session open, BEARISH if below, else NEUTRAL.
-- stoch_signal:BULLISH if spot is in top 30% of session range, BEARISH if bottom 30%, else NEUTRAL.
-- bb_signal:   BULLISH if spot at session high, BEARISH if at session low, else NEUTRAL.
-- pcr_signal:  use VIX — BULLISH if VIX < 14, BEARISH if VIX > 18, else NEUTRAL.
-- oi_signal:   mirror direction (BULLISH if direction=CE, BEARISH if PE, NEUTRAL if WAIT).
-
-Return ONLY this exact JSON (no markdown):
-{"direction":"CE","confidence":72,"rsi_signal":"BULLISH","macd_signal":"BULLISH","ema_signal":"BULLISH","vwap_signal":"BULLISH","stoch_signal":"BULLISH","bb_signal":"NEUTRAL","pcr_signal":"NEUTRAL","oi_signal":"BULLISH","reasoning":"intraday +0.42% with +0.18% 5m momentum, spot near session high, VIX subdued","action":"BUY CE","strike_preference":"ATM","risk":"MEDIUM"}
-
-direction MUST be 'CE' or 'PE'. Only use 'WAIT' when ticks_observed < 3.`}]})});
+Return ONLY this exact JSON schema:
+{"direction":"CE","confidence":72,"rsi_signal":"BULLISH","macd_signal":"BULLISH","ema_signal":"BULLISH","vwap_signal":"BULLISH","stoch_signal":"BULLISH","bb_signal":"NEUTRAL","pcr_signal":"NEUTRAL","oi_signal":"BULLISH","reasoning":"intraday momentum positive","action":"BUY CE","strike_preference":"ATM","risk":"MEDIUM"}`}]})});
     const data=await res.json();
     const text=data.content?.[0]?.text||'{}';
-    // safely parse — handle markdown fences and extra whitespace
     let r;
     try {
       const clean = text.replace(/```json/g,'').replace(/```/g,'').trim();
       r = JSON.parse(clean);
     } catch(pe) {
-      // try extracting JSON object from text
       const m = text.match(/\{[\s\S]*\}/);
       if(m) r = JSON.parse(m[0]);
-      else throw new Error('Could not parse AI response: '+text.substring(0,100));
+      else throw new Error('Could not parse response.');
     }
-    // validate required fields
     const dir  = (r.direction||'WAIT').toString().trim().toUpperCase();
     const conf = parseInt(r.confidence)||50;
-    const reason = r.reasoning || r.reason || 'Analysis complete';
-    const action = r.action || (dir==='CE'?'BUY CE':dir==='PE'?'BUY PE':'WAIT');
+    const reason = r.reasoning || 'Analysis complete';
+    const action = r.action || 'WAIT';
     const strike = r.strike_preference || 'ATM';
     const risk   = (r.risk||'MEDIUM').toString().toUpperCase();
     G.sig = {...r, direction:dir, confidence:conf, _fromClaude:true, _ts:Date.now()};
@@ -2124,24 +1712,12 @@ direction MUST be 'CE' or 'PE'. Only use 'WAIT' when ticks_observed < 3.`}]})});
       [action,'var(--accent)'],[strike,'var(--text)'],[risk+' RISK',riskColor]
     ].map(([v,c])=>`<span class="badge" style="color:${c};border-color:${c}">${v}</span>`).join('');
 
-    document.getElementById('lastScan').textContent='Last: '+new Date().toLocaleTimeString('en-IN',{hour12:false})+' · Auto every 30s when bot ON';
-    log('Signal: '+dir+' ('+conf+'%) — '+reason,dir==='CE'?'success':dir==='PE'?'error':'warn');
-    if(dir==='WAIT'){
-      const ticks = md.ticks_observed;
-      const chg = parseFloat(md.intraday_change_pct);
-      if(ticks < 6){
-        log(`WAIT cause: only ${ticks} ticks (need 6+, ~30s).`,'warn');
-      } else if(Math.abs(chg) < 0.08){
-        log(`WAIT cause: chg ${md.intraday_change_pct}% inside ±0.08% noise zone — no direction yet.`,'warn');
-      } else {
-        log(`WAIT cause: change/momentum disagree or VIX risk-off.`,'warn');
-      }
-    }
-  }catch(e){log('AI error: '+e.message,'error');document.getElementById('sigDir').textContent='ERROR';document.getElementById('sigReason').textContent='Check Claude API key';}
+    document.getElementById('lastScan').textContent='Last: '+new Date().toLocaleTimeString('en-IN',{hour12:false});
+    log('Signal: '+dir+' ('+conf+'%) — '+reason,dir==='CE'?'success':'error');
+  }catch(e){log('AI error: '+e.message,'error');}
   btn.disabled=false; btn.textContent='⟳ ANALYZE NOW';
 }
 
-// ── BOT ───────────────────────────────────────────────────────────────────
 async function startBot(){
   if(!document.getElementById('cKey').value.trim()){log('Claude API key required.','warn');return;}
   G.botOn=true;
@@ -2153,21 +1729,16 @@ async function startBot(){
   document.getElementById('botBadge').className='badge bg';
   document.getElementById('fBot').textContent='● BOT ACTIVE';
   document.getElementById('fBot').style.color='var(--green)';
-  log('Bot started — Claude analyze every 30 s, fast lean every tick (~5 s).','success');
+  log('Bot started.','success');
   await cycle();
   G.botIv=setInterval(async()=>{
     if(!G.botOn) return;
     const mkt=marketStatus();
     if(!mkt.open){
-      // Don't fire trades or burn Claude calls outside market hours.
-      // Refresh wallet/positions only — they still update in/out of session.
       if(G.sid){await fetchWallet().catch(()=>{}); await fetchPos().catch(()=>{});}
-      const sb=document.getElementById('sigBadge');
-      sb.textContent='MARKET CLOSED'; sb.className='badge bd';
       return;
     }
     await cycle();
-    // Risk engine kill-switch — also stops the bot loop when caps fire.
     if(G.sid){
       try{
         const rs=await api('/risk/state',{},'GET');
@@ -2181,77 +1752,86 @@ async function startBot(){
   },30000);
 }
 
-// ── AUTONOMOUS DISPATCH ───────────────────────────────────────────────────
-// Gates checked in order. Every refusal logs *why* so the user can audit
-// the bot's behaviour from the LOG tab. All checks are conservative — a
-// failure to evaluate a gate (e.g. /rate_limit/status timeout) leaves the
-// trade un-dispatched, never auto-fires it.
 async function dispatchAutoTrade(){
   if(!G.botOn || !G.sig) return;
   const dir = G.sig.direction;
   const conf = G.sig.confidence;
   if(dir === 'WAIT'){ return; }
 
-  // 0a. Spec timing gates — no entries 09:15-09:30, after 14:40, or on
-  //     expiry days. Single source of truth via entryWindowAllowed().
   const win = entryWindowAllowed();
-  if(!win.ok){
-    log('Auto-trade SKIP — '+win.reason,'warn'); return;
-  }
-  // 0b. NEUTRAL bias bucket → no trades. Spec: only act on strong-bullish
-  //     (CE) or strong-bearish (PE). Bullish/Bearish at lower conviction
-  //     still trade but get caught by the confidence floor below.
-  if(G.sig.bias === 'NEUTRAL'){
-    log('Auto-trade SKIP — bias NEUTRAL (|score| < 0.20)','info'); return;
-  }
-  // 1. Confidence floor.
-  if(conf < G.minConfidence){
-    log('Auto-trade SKIP — confidence '+conf+' < '+G.minConfidence,'info'); return;
-  }
-  // 2. Max concurrent positions.
-  if(G.open.length >= G.maxConcurrent){
-    log('Auto-trade SKIP — '+G.open.length+'/'+G.maxConcurrent+' positions already open','info'); return;
-  }
-  // 3. Per-entry cooldown (only enforced when at least one position is open;
-  //    otherwise the user has likely been flat for a while).
+  if(!win.ok){ log('Auto-trade SKIP — '+win.reason,'warn'); return; }
+  if(G.sig.bias === 'NEUTRAL'){ log('Auto-trade SKIP — bias NEUTRAL','info'); return; }
+  if(conf < G.minConfidence){ log('Auto-trade SKIP — confidence low','info'); return; }
+  if(G.open.length >= G.maxConcurrent){ log('Auto-trade SKIP — max concurrent hit','info'); return; }
+
   const sinceLast = Date.now() - G.lastEntryTs;
-  if(sinceLast < G.cooldownMs && G.open.length > 0){
-    log('Auto-trade SKIP — cooldown '+Math.ceil((G.cooldownMs-sinceLast)/1000)+'s remaining','info'); return;
-  }
-  // 4. Pick the ATM strike row.
+  if(sinceLast < G.cooldownMs && G.open.length > 0){ log('Auto-trade SKIP — cooldown','info'); return; }
+
+  const avl = G.wallet ? parseFloat(G.wallet.avlMrgn || G.wallet.avlCash || 0) : 0;
+  const lotSize = LS[G.inst];
   const step = G.inst==='SENSEX'?100:50;
-  const atm  = Math.round(G.spot[G.inst]/step)*step;
-  const ar   = G.chain.find(r => r.strike === atm);
-  if(!ar){ log('Auto-trade SKIP — no chain row for ATM '+atm,'warn'); return; }
-  // 5. De-dupe: refuse if we already hold this strike+side.
-  const dup = G.open.find(t => t.symbol && t.symbol.indexOf(atm+dir) >= 0);
+  const spot = G.spot[G.inst];
+  const atm = Math.round(spot/step)*step;
+
+  let selectedRow = null;
+  let finalLots = G.lots;
+
+  if (!G.sid || avl <= 0) {
+    selectedRow = G.chain.find(r => r.strike === atm);
+    if(!selectedRow){ log('Auto-trade SKIP — no chain row for ATM '+atm,'warn'); return; }
+  } else {
+    const pctLimit = 0.20;
+    const tradeBudget = avl * pctLimit;
+    
+    let candidateRows = [...G.chain];
+    if (dir === 'CE') {
+      candidateRows = candidateRows.filter(r => r.strike >= atm).sort((a, b) => a.strike - b.strike);
+    } else {
+      candidateRows = candidateRows.filter(r => r.strike <= atm).sort((a, b) => b.strike - a.strike);
+    }
+    
+    for (const row of candidateRows) {
+      const leg = dir === 'CE' ? row.ce : row.pe;
+      if (!leg || leg.ltp <= 0) continue;
+      
+      const oneLotCost = leg.ltp * lotSize;
+      if (oneLotCost <= avl) {
+        selectedRow = row;
+        let calculatedLots = Math.floor(tradeBudget / oneLotCost);
+        if (calculatedLots < 1) {
+          calculatedLots = 1;
+        }
+        finalLots = Math.min(10, calculatedLots);
+        break;
+      }
+    }
+
+    if (!selectedRow) {
+      log(`Auto-trade SKIP — No affordable ${dir} option strikes found in the chain within available wallet of ₹${avl.toFixed(2)}` ,'warn');
+      return;
+    }
+  }
+
+  const dup = G.open.find(t => t.symbol && t.symbol.indexOf(selectedRow.strike+dir) >= 0);
   if(dup){ log('Auto-trade SKIP — already long '+dup.symbol,'info'); return; }
-  // 6. Rate-limit headroom. Refuse if either limiter > 90% used.
+
   try{
-    const r = await fetch(API+'/rate_limit/status').then(x=>x.json()).catch(()=>null);
+    const r = await fetch('/rate_limit/status').then(x=>x.json()).catch(()=>null);
     if(r && r.general_api && r.order_api){
       const genUsed = r.general_api.used / Math.max(1, r.general_api.limit);
       const ordUsed = r.order_api.used   / Math.max(1, r.order_api.limit);
       if(genUsed > G.rlHeadroom || ordUsed > G.rlHeadroom){
-        log('Auto-trade SKIP — rate-limit headroom low (gen '+(genUsed*100).toFixed(0)+'% / ord '+(ordUsed*100).toFixed(0)+'%)','warn');
+        log('Auto-trade SKIP — rate-limit headroom low','warn');
         return;
       }
     }
-  }catch(e){ /* don't block on observability check */ }
+  }catch(e){}
 
-  // All gates passed.
   G.lastEntryTs = Date.now();
-  log('AUTO-TRADE → '+dir+' @ '+atm+' (conf '+conf+'%, news '+(G.news?.sentiment_score??'n/a')+')','trade');
-  placeOrder(dir, ar);
+  log(`AUTO-TRADE → Buy ${dir} Strike ${selectedRow.strike} | Lots: ${finalLots} | (conf ${conf}%)` ,'trade');
+  placeOrder(dir, selectedRow, finalLots);
 }
 
-// ── NEWS FETCH (broad sentiment + optional Telegram channel) ──────────────
-// Two sources merged into G.news:
-//   1. /news/sentiment — Google/Bing news RSS (general market mood)
-//   2. /news/telegram  — the public Telegram channel the user follows,
-//                        if any. Channel username persists in localStorage.
-// Combined sentiment_score is a vote-weighted average so a busy channel
-// can pull more weight on a slow news day, and vice versa.
 async function fetchNews(){
   let baseScore = 0, baseMatched = 0;
   try{
@@ -2259,18 +1839,14 @@ async function fetchNews(){
     G.news = r;
     baseScore = r.sentiment_score || 0;
     baseMatched = r.matched || 0;
-    log('News '+(r.cached?'(cache)':'(fresh)')+' — sentiment '+r.sentiment_score+' across '+r.count+' headlines'+(r.error?(' err:'+r.error):''),'info');
-  }catch(e){
-    log('News fetch error: '+e.message,'warn');
-  }
+    log('News — sentiment '+r.sentiment_score+' across '+r.count+' headlines','info');
+  }catch(e){ log('News fetch error: '+e.message,'warn'); }
   if(G.tgChannel){
     try{
       const tg = await api('/news/telegram', {channel: G.tgChannel});
       if(tg.ok){
         G.tgNews = tg;
-        log('Telegram @'+tg.channel+' '+(tg.cached?'(cache)':'(fresh)')+' — sentiment '+tg.sentiment_score+' across '+tg.count+' msgs (matched '+tg.matched+')','success');
-        // Vote-weighted merge so a quiet channel doesn't dilute the broader
-        // news and a noisy channel doesn't overwhelm it.
+        log('Telegram @'+tg.channel+' — sentiment '+tg.sentiment_score+' across '+tg.count+' msgs','success');
         const w1 = Math.max(1, baseMatched);
         const w2 = Math.max(1, tg.matched || 0);
         const merged = (baseScore * w1 + (tg.sentiment_score||0) * w2) / (w1 + w2);
@@ -2284,20 +1860,15 @@ async function fetchNews(){
             headlines: [...(G.news.headlines || []), ...(tg.headlines || []).map(h => '[TG] '+h)].slice(-12),
           };
         } else {
-          G.news = {sentiment_score: tg.sentiment_score, headlines: tg.headlines, count: tg.count, matched: tg.matched, _tg_only: true};
+          G.news = {sentiment_score: tg.sentiment_score, headlines: tg.headlines, count: tg.count, matched: tg.matched};
         }
-      } else {
-        log('Telegram @'+G.tgChannel+' failed: '+(tg.error||'?'),'warn');
       }
-    }catch(e){
-      log('Telegram fetch error: '+e.message,'warn');
-    }
+    }catch(e){ log('Telegram fetch error: '+e.message,'warn'); }
   }
 }
 
 function round(n, d){ const f = Math.pow(10, d); return Math.round(n*f)/f; }
 
-// Save the Telegram channel username (persisted in localStorage).
 G.tgChannel = '';
 try { G.tgChannel = localStorage.getItem('nexus_tg_channel') || ''; } catch(_) {}
 function setTgChannel(){
@@ -2340,26 +1911,12 @@ async function squareOff(){
   }
 }
 
-// ── SESSION RESTORE ────────────────────────────────────────────────────────
-// On page load: if a saved session exists in localStorage, try to bring
-// it back to life so the user does NOT have to re-do TOTP+MPIN on every
-// refresh / redeploy.
-//
-// Recovery ladder, cheapest to most expensive:
-//   1. /auth/check       — does the backend already remember this sid?
-//                          (Survives a tab refresh on a hot backend.)
-//   2. /auth/rehydrate   — reseed the in-memory session from the stored
-//                          blob. (Survives a Railway redeploy that wiped
-//                          the in-memory dict + the on-disk sessions.json.)
-//   3. expired/corrupt   — drop the stored blob and show the login form.
 async function restoreSession(){
   let saved;
   try{ saved = JSON.parse(localStorage.getItem('nexus_session') || 'null'); }
   catch(_){ saved = null; }
   if(!saved || !saved.session_id || !saved.session_blob){ return; }
 
-  // Local TTL gate — don't even ask the server if the saved copy is older
-  // than its declared TTL.
   const ttlMs = (saved.ttl_hours || 20) * 3600 * 1000;
   if(Date.now() - (saved.saved_at||0) > ttlMs){
     log('Saved session expired locally; please log in again.','warn');
@@ -2367,39 +1924,32 @@ async function restoreSession(){
     return;
   }
 
-  // 1. Quick existence check.
   try{
     const chk = await api('/auth/check', {session_id: saved.session_id});
     if(chk.alive){
-      activateSession(saved.session_id, /*restored=*/true);
+      activateSession(saved.session_id, true);
       return;
     }
-    // 2. Rehydrate — backend forgot us, reseed from the stored blob.
-    log('Backend lost session (likely redeploy) — rehydrating…','info');
+    log('Backend lost session — rehydrating…','info');
     const rh = await api('/auth/rehydrate', {
       session_id:   saved.session_id,
       session_blob: saved.session_blob
     });
     if(rh.alive){
-      activateSession(saved.session_id, /*restored=*/true);
+      activateSession(saved.session_id, true);
       return;
     }
-    log('Rehydrate refused: '+(rh.reason||'?')+' — please log in again.','warn');
+    log('Rehydrate refused — please log in again.','warn');
     try{ localStorage.removeItem('nexus_session'); }catch(_){}
   }catch(e){
-    log('Session restore error: '+e.message+' — please log in again.','warn');
+    log('Session restore error: '+e.message,'warn');
     try{ localStorage.removeItem('nexus_session'); }catch(_){}
   }
 }
 
-// ── INIT ──────────────────────────────────────────────────────────────────
 buildChain(); chkServer(); mountChart(); _startTechLoop();
 log('NEXUS Bot v3 ready — Real Kotak API connected.','info');
-log('Tap WALLET → authenticate → real NIFTY price feeds automatically.','info');
-log('Position monitor: REAL Kotak LTP polling every '+ (typeof MON_POLL_MS!=='undefined'?MON_POLL_MS:3000) +' ms. Exits place a real SELL @ MKT.','info');
-restoreSession();   // try to skip the login screen entirely
-// Hydrate Telegram channel input from localStorage so the user does not
-// have to re-paste it on every page load.
+restoreSession();
 try {
   const tg = localStorage.getItem('nexus_tg_channel') || '';
   if(tg){
