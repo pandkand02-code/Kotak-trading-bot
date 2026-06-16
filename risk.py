@@ -24,12 +24,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RiskConfig:
-    daily_profit_pct:  float = 10.0  # lock in & stop trading at +10%
-    daily_loss_pct:    float = 8.0   # stop trading at -8%
-    overall_loss_pct:  float = 10.0  # hard stop at -10% wallet drawdown
+    daily_profit_pct:  float = 10.0  # optional lock-in at +10%
+    daily_loss_pct:    float = 5.0   # user spec: stop trading at -5%
+    overall_loss_pct:  float = 5.0   # hard stop aligned to daily loss cap
     per_trade_tp_pct:  float = 3.0   # default take profit
     per_trade_sl_pct:  float = 2.0   # default stop loss
-    capital_per_trade_pct: float = 15.0  # max % of wallet to deploy per trade
+    capital_per_trade_pct: float = 1.0  # user spec: max 1% capital at risk/deployed per trade
     # Spec-mandated trade-frequency limits.
     max_trades_per_day:      int = 10   # hard ceiling
     consec_loss_pause_count: int = 3    # pause trading after this many losses in a row
