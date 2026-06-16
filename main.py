@@ -887,6 +887,308 @@ async def news_telegram(req: TelegramNewsRequest):
     _tg_cache[channel] = (now + TG_TTL, payload)
     return payload
 
+
+# ========================= ADVANCED SIGNAL ENGINE =========================
+# Senior-dev note:
+# News is treated as a confirmation layer only. The execution decision is based on
+# weighted consensus: technicals 60%, news 20%, global/risk context 10%, VIX 10%.
+# This prevents the bot from buying options just because a headline looks bullish.
+
+_HIGH_IMPACT_TERMS = {
+    "rbi", "fed", "inflation", "cpi", "rate", "rates", "policy", "repo", "war",
+    "election", "budget", "crude", "oil", "dollar", "usd", "yield", "yields",
+    "fii", "dii", "banknifty", "nifty", "sensex", "global", "gift", "sgx",
+}
+_BULL_PHRASES = {
+    "rate cut": 0.35, "beats estimates": 0.35, "strong earnings": 0.30,
+    "record high": 0.25, "fii buying": 0.30, "dii buying": 0.20,
+    "crude falls": 0.20, "dollar weakens": 0.15, "inflation cools": 0.25,
+    "positive global cues": 0.25, "gift nifty up": 0.20,
+}
+_BEAR_PHRASES = {
+    "rate hike": -0.35, "misses estimates": -0.35, "weak earnings": -0.30,
+    "fii selling": -0.30, "crude rises": -0.20, "dollar strengthens": -0.15,
+    "inflation rises": -0.25, "negative global cues": -0.25, "gift nifty down": -0.20,
+    "war escalates": -0.35, "sell off": -0.35, "selloff": -0.35,
+}
+
+class AdvancedSignalRequest(BaseModel):
+    session_id: str
+    instrument: str = "NIFTY"
+    telegram_channel: str = ""
+    include_telegram: bool = False
+    min_confidence: int = 75
+
+
+def _clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
+
+
+def _ema(values: list[float], period: int) -> float | None:
+    if not values:
+        return None
+    if len(values) < period:
+        return sum(values) / len(values)
+    k = 2 / (period + 1)
+    ema = sum(values[:period]) / period
+    for price in values[period:]:
+        ema = price * k + ema * (1 - k)
+    return ema
+
+
+def _rsi(values: list[float], period: int = 14) -> float | None:
+    if len(values) < period + 1:
+        return None
+    gains, losses = [], []
+    for i in range(1, len(values)):
+        diff = values[i] - values[i - 1]
+        gains.append(max(diff, 0))
+        losses.append(abs(min(diff, 0)))
+    gains = gains[-period:]
+    losses = losses[-period:]
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+
+def _macd(values: list[float]) -> dict:
+    if len(values) < 26:
+        return {"macd": None, "signal": None, "histogram": None}
+    macd_line = (_ema(values, 12) or 0) - (_ema(values, 26) or 0)
+    # lightweight signal approximation from rolling macd values
+    macd_series = []
+    for i in range(26, len(values) + 1):
+        sub = values[:i]
+        macd_series.append((_ema(sub, 12) or 0) - (_ema(sub, 26) or 0))
+    signal = _ema(macd_series, 9) if macd_series else None
+    hist = macd_line - signal if signal is not None else None
+    return {"macd": round(macd_line, 4), "signal": round(signal, 4) if signal is not None else None, "histogram": round(hist, 4) if hist is not None else None}
+
+
+def _headline_score(text: str) -> tuple[float, int, list[str]]:
+    t = text.lower()
+    score = 0.0
+    reasons: list[str] = []
+    for phrase, val in _BULL_PHRASES.items():
+        if phrase in t:
+            score += val
+            reasons.append(f"bull_phrase:{phrase}")
+    for phrase, val in _BEAR_PHRASES.items():
+        if phrase in t:
+            score += val
+            reasons.append(f"bear_phrase:{phrase}")
+    words = set(re.findall(r"[a-z]+", t))
+    bull_hits = words & _BULL_WORDS
+    bear_hits = words & _BEAR_WORDS
+    if bull_hits:
+        score += min(0.30, 0.08 * len(bull_hits))
+        reasons.append("bull_words:" + ",".join(sorted(bull_hits)[:4]))
+    if bear_hits:
+        score -= min(0.30, 0.08 * len(bear_hits))
+        reasons.append("bear_words:" + ",".join(sorted(bear_hits)[:4]))
+    impact = 1 + min(4, len(words & _HIGH_IMPACT_TERMS))
+    return _clamp(score, -1.0, 1.0), impact, reasons
+
+
+def _aggregate_headlines(headlines: list[str]) -> dict:
+    rows = []
+    weighted_sum = 0.0
+    weight_total = 0.0
+    for h in headlines[:20]:
+        sc, impact, reasons = _headline_score(h)
+        weight = impact
+        if abs(sc) > 0:
+            weighted_sum += sc * weight
+            weight_total += weight
+        rows.append({"headline": h, "score": round(sc, 3), "impact": impact, "reasons": reasons[:4]})
+    final = weighted_sum / weight_total if weight_total else 0.0
+    coverage = min(100, int((len([r for r in rows if abs(r["score"]) > 0]) / max(1, min(len(rows), 10))) * 100))
+    confidence = int(_clamp(abs(final) * 100 + coverage * 0.35, 0, 100))
+    return {"score": round(final, 3), "confidence": confidence, "items": rows, "coverage": coverage}
+
+
+async def _advanced_news_context(instrument: str, telegram_channel: str = "", include_telegram: bool = False) -> dict:
+    base = await news_sentiment(NewsSentimentRequest(instrument=instrument))
+    headlines = list(base.get("headlines") or [])
+    tg_payload = None
+    if include_telegram and telegram_channel:
+        tg_payload = await news_telegram(TelegramNewsRequest(channel=telegram_channel))
+        if tg_payload.get("ok"):
+            headlines.extend(tg_payload.get("headlines") or [])
+    agg = _aggregate_headlines(headlines)
+    bias = "BULLISH" if agg["score"] >= 0.18 else "BEARISH" if agg["score"] <= -0.18 else "NEUTRAL"
+    return {
+        "bias": bias,
+        "sentiment_score": agg["score"],
+        "confidence": agg["confidence"],
+        "coverage": agg["coverage"],
+        "headlines": headlines[:12],
+        "scored_items": agg["items"][:12],
+        "rss_error": base.get("error"),
+        "telegram": tg_payload,
+    }
+
+
+def _technical_from_market(md: dict, prices: list[float]) -> dict:
+    ltp = float(md.get("ltp") or 0)
+    open_ = float(md.get("open") or ltp or 0)
+    high = float(md.get("high") or ltp or 0)
+    low = float(md.get("low") or ltp or 0)
+    vix = float(md.get("vix") or 15)
+    change = float(md.get("change") or 0)
+    momentum_5m = float(md.get("momentum_5m") or 0)
+    if ltp > 0 and (not prices or prices[-1] != ltp):
+        prices = prices + [ltp]
+    ema20 = _ema(prices, 20) if prices else None
+    ema50 = _ema(prices, 50) if prices else None
+    rsi14 = _rsi(prices, 14) if prices else None
+    macd = _macd(prices) if prices else {"macd": None, "signal": None, "histogram": None}
+    day_range = max(high - low, 0.01)
+    vwap_proxy = (high + low + ltp) / 3 if ltp else 0
+
+    score = 0.0
+    reasons: list[str] = []
+    if ltp and ema20:
+        if ltp > ema20:
+            score += 0.18; reasons.append("price_above_ema20")
+        else:
+            score -= 0.18; reasons.append("price_below_ema20")
+    if ema20 and ema50:
+        if ema20 > ema50:
+            score += 0.16; reasons.append("ema20_above_ema50")
+        else:
+            score -= 0.16; reasons.append("ema20_below_ema50")
+    if rsi14 is not None:
+        if 55 <= rsi14 <= 70:
+            score += 0.16; reasons.append("rsi_bullish_not_overbought")
+        elif 30 <= rsi14 <= 45:
+            score -= 0.16; reasons.append("rsi_bearish_not_oversold")
+        elif rsi14 > 78:
+            score -= 0.10; reasons.append("rsi_overbought")
+        elif rsi14 < 22:
+            score += 0.10; reasons.append("rsi_oversold_bounce_zone")
+    if macd.get("histogram") is not None:
+        if macd["histogram"] > 0:
+            score += 0.14; reasons.append("macd_positive")
+        else:
+            score -= 0.14; reasons.append("macd_negative")
+    if ltp > vwap_proxy:
+        score += 0.10; reasons.append("price_above_vwap_proxy")
+    elif ltp:
+        score -= 0.10; reasons.append("price_below_vwap_proxy")
+    # opening range / intraday breakout proxy
+    if ltp >= high - day_range * 0.15 and change > 0:
+        score += 0.14; reasons.append("near_day_high_breakout")
+    if ltp <= low + day_range * 0.15 and change < 0:
+        score -= 0.14; reasons.append("near_day_low_breakdown")
+    if momentum_5m > 0.08:
+        score += 0.10; reasons.append("positive_5m_momentum")
+    elif momentum_5m < -0.08:
+        score -= 0.10; reasons.append("negative_5m_momentum")
+
+    score = _clamp(score, -1.0, 1.0)
+    bias = "BULLISH" if score >= 0.25 else "BEARISH" if score <= -0.25 else "NEUTRAL"
+    data_quality = min(100, 25 + len(prices) * 3)
+    confidence = int(_clamp(abs(score) * 100 * 0.75 + data_quality * 0.25, 0, 100))
+    return {
+        "bias": bias,
+        "technical_score": round(score, 3),
+        "confidence": confidence,
+        "data_points": len(prices),
+        "ltp": ltp,
+        "open": open_, "high": high, "low": low, "vwap_proxy": round(vwap_proxy, 2),
+        "change": change, "momentum_5m": momentum_5m, "vix": vix,
+        "ema20": round(ema20, 2) if ema20 else None,
+        "ema50": round(ema50, 2) if ema50 else None,
+        "rsi14": round(rsi14, 2) if rsi14 is not None else None,
+        "macd": macd,
+        "reasons": reasons,
+    }
+
+
+def _market_regime_score(md: dict, technical: dict) -> dict:
+    vix = float(md.get("vix") or 15)
+    change = float(md.get("change") or 0)
+    score = 0.0
+    reasons = []
+    if vix >= 22:
+        score -= 0.25; reasons.append("high_vix_avoid_option_buying")
+    elif vix <= 13:
+        score += 0.10; reasons.append("low_vix_stable")
+    else:
+        reasons.append("normal_vix")
+    if abs(change) >= 0.35:
+        score += 0.10 if change > 0 else -0.10
+        reasons.append("index_direction_confirmed")
+    return {"score": round(_clamp(score, -1, 1), 3), "vix": vix, "reasons": reasons}
+
+
+@app.post("/signals/advanced")
+async def advanced_signal(req: AdvancedSignalRequest):
+    # Market data fetch also records ticks, which improves indicators over time.
+    md = await get_market_data(QuoteRequest(session_id=req.session_id, instrument=req.instrument))
+    if not md.get("success"):
+        return {"success": False, "error": "market data failed", "market_data": md}
+    try:
+        prices = tick_recorder.prices(req.instrument.upper(), limit=120)  # added in ticks.py
+    except Exception:
+        prices = []
+    technical = _technical_from_market(md, prices)
+    news = await _advanced_news_context(req.instrument, req.telegram_channel, req.include_telegram)
+    regime = _market_regime_score(md, technical)
+
+    composite = (
+        technical["technical_score"] * 0.60 +
+        news["sentiment_score"] * 0.20 +
+        regime["score"] * 0.10 +
+        (0.10 if technical.get("vix", 15) < 20 else -0.10) * 0.10
+    )
+    composite = round(_clamp(composite, -1.0, 1.0), 3)
+    confidence = int(_clamp(
+        technical["confidence"] * 0.60 + news["confidence"] * 0.20 + abs(regime["score"]) * 100 * 0.10 + 10,
+        0, 100
+    ))
+    if confidence < req.min_confidence or abs(composite) < 0.28:
+        action = "WAIT"
+        option_side = None
+    elif composite > 0:
+        action = "BUY_CE"
+        option_side = "CE"
+    else:
+        action = "BUY_PE"
+        option_side = "PE"
+
+    risk_ok, risk_reason = risk_engine.can_trade(0)
+    if not risk_ok:
+        action = "BLOCKED_BY_RISK"
+        option_side = None
+
+    return {
+        "success": True,
+        "instrument": req.instrument.upper(),
+        "action": action,
+        "option_side": option_side,
+        "confidence": confidence,
+        "composite_score": composite,
+        "min_confidence": req.min_confidence,
+        "weights": {"technical": 0.60, "news": 0.20, "market_regime": 0.10, "vix": 0.10},
+        "technical": technical,
+        "news": news,
+        "market_regime": regime,
+        "risk": {"allowed": risk_ok, "reason": risk_reason, "state": risk_engine.state()},
+        "market_data": {k: md.get(k) for k in ("ltp", "open", "high", "low", "change", "vix", "momentum_5m", "source")},
+        "execution_note": "Use this signal only as pre-trade confirmation. Keep separate order placement and stop-loss logic active.",
+    }
+
+@app.post("/news/advanced")
+async def advanced_news(req: AdvancedSignalRequest):
+    return await _advanced_news_context(req.instrument, req.telegram_channel, req.include_telegram)
+
+# ======================= END ADVANCED SIGNAL ENGINE =======================
+
 @app.post("/quotes/stream_status")
 async def stream_status(req: SessionRequest):
     s = streamers.get(req.session_id)
