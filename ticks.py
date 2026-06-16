@@ -89,6 +89,16 @@ class TickRecorder:
                 "session_age_s": round(now - open_ts, 1),
             }
 
+
+    def prices(self, symbol: str, limit: int = 200) -> list[float]:
+        """Return recent recorded LTP values for indicator calculation."""
+        with self._lock:
+            dq = self._ticks.get(symbol)
+            if not dq:
+                return []
+            vals = [float(p) for _, p in list(dq)[-limit:]]
+            return vals
+
     def status(self) -> dict:
         with self._lock:
             return {
