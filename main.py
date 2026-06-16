@@ -1,11 +1,3 @@
-"""
-NEXUS Trading Bot v3 — FastAPI Backend
-Real Kotak NEO API: Live quotes, OHLC, wallet, orders
-Rate limits enforced as per Kotak NEO API documentation:
-  - Max 10 requests per second (Enforced with a strict 120ms spacing queue)
-  - Max 200 orders per minute
-"""
-
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -19,14 +11,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
 def safe_json(r: httpx.Response):
-    """Parse a Kotak response defensively.
-
-    Returns (data, error). When the upstream returns an empty body or HTML
-    error page, r.json() raises json.JSONDecodeError which is caught and
-    formatted into a structured error message with status and body snippet.
-    """
     text = (r.text or "").strip()
     ctype = r.headers.get("content-type", "")
     if not text:
@@ -37,60 +22,42 @@ def safe_json(r: httpx.Response):
         snippet = text[:300].replace("\n", " ").replace("\r", " ")
         return None, f"non-JSON body (HTTP {r.status_code}, content-type={ctype}): {snippet}"
 
-
 def _clean_symbol(s: str) -> str:
-    """Normalize symbol string to prevent case, space, or underscore discrepancies."""
     if not s:
         return ""
     return s.lower().replace(" ", "").replace("_", "").replace("-", "").strip()
 
-
 app = FastAPI(title="NEXUS Trading Bot v3")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-# ── PRO-GRADE SPACING RATE LIMITER ────────────────────────────────────────────
 class RateLimiter:
     def __init__(self):
-        # General: 9 req/sec ceiling (10% safety margin under Kotak's 10 limit)
         self.general_window  = deque()
         self.general_limit   = 9
         self.general_period  = 1.0
-
-        # Anti-Burst Lock: serializes requests with a minimum 120ms spacing gap
         self._lock = asyncio.Lock()
         self._last_request_time = 0.0
-        self._min_spacing = 0.12  # 120ms spacing limits throughput to ~8.3 req/s max
-
-        # Orders: 200 orders/min
+        self._min_spacing = 0.12
         self.order_window    = deque()
         self.order_limit     = 200
         self.order_period    = 60.0
-
         self.total_blocked   = 0
         self.total_allowed   = 0
 
     def _clean(self, dq: deque, period: float) -> None:
-        """Remove timestamps older than the window period."""
         cutoff = time.monotonic() - period
         while dq and dq[0] < cutoff:
             dq.popleft()
 
     async def acquire_slot(self):
-        """Acquire a general request slot, delaying the execution if necessary to enforce strict spacing."""
         async with self._lock:
             now = time.monotonic()
-            
-            # 1. Enforce anti-burst spacing (120ms minimum gap)
             elapsed = now - self._last_request_time
             if elapsed < self._min_spacing:
                 delay = self._min_spacing - elapsed
                 await asyncio.sleep(delay)
                 now = time.monotonic()
-            
-            # 2. Clean sliding window
             self._clean(self.general_window, self.general_period)
-            
-            # 3. If window is full, pause execution until the oldest slot falls out
             while len(self.general_window) >= self.general_limit:
                 oldest = self.general_window[0]
                 wait_time = (oldest + self.general_period) - now
@@ -98,7 +65,6 @@ class RateLimiter:
                     await asyncio.sleep(wait_time)
                 now = time.monotonic()
                 self._clean(self.general_window, self.general_period)
-            
             self.general_window.append(now)
             self._last_request_time = now
             self.total_allowed += 1
@@ -128,23 +94,19 @@ class RateLimiter:
 
 rl = RateLimiter()
 
-# ── RATE LIMIT STATUS ENDPOINT ────────────────────────────────────────────────
 @app.get("/rate_limit/status")
 async def rate_limit_status():
     return rl.status()
 
-# ── MIDDLEWARE: Smooth Rate-Limiting Queue ──
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
     path = request.url.path
     protected = ["/auth/", "/wallet/", "/quotes/", "/orders/", "/positions", "/trades", "/chain/", "/scrip/"]
     if any(path.startswith(p) for p in protected):
         try:
-            # Enforce serialization and spacing queue
             await rl.acquire_slot()
         except Exception as e:
             return JSONResponse(status_code=429, content={"error": "Rate limiter queue delay failed", "detail": str(e)})
-            
     response = await call_next(request)
     s = rl.status()
     response.headers["X-RateLimit-General-Used"]      = str(s["general_api"]["used"])
@@ -161,14 +123,12 @@ sessions: dict     = {}
 SESSIONS_FILE = os.environ.get("SESSIONS_FILE", "sessions.json")
 SESSION_TTL_HOURS = int(os.environ.get("SESSION_TTL_HOURS", "20"))
 
-
 def _sessions_save() -> None:
     try:
         with open(SESSIONS_FILE, "w") as f:
             json.dump(sessions, f)
     except OSError as e:
         logger.warning(f"sessions persist failed: {e}")
-
 
 def _sessions_load() -> None:
     if not os.path.exists(SESSIONS_FILE):
@@ -191,11 +151,9 @@ def _sessions_load() -> None:
             kept += 1
     logger.info(f"sessions loaded: {kept}/{len(loaded)} from {SESSIONS_FILE}")
 
-
 @app.on_event("startup")
 async def _on_startup():
     _sessions_load()
-
 
 from streamer import KotakStreamer
 streamers: dict[str, KotakStreamer] = {}
@@ -206,7 +164,6 @@ from ticks import TickRecorder
 scrip_master = ScripMaster()
 risk_engine = RiskEngine()
 tick_recorder = TickRecorder()
-
 
 async def get_streamer(sid: str) -> KotakStreamer:
     sess = get_session(sid)
@@ -221,7 +178,6 @@ async def get_streamer(sid: str) -> KotakStreamer:
     await s.ensure_running()
     return s
 
-# ── Kotak Instrument Tokens ───────────────────────────────────────────────
 INSTRUMENT_TOKENS = {
     "NIFTY":       {"instrument_token": "26000", "exchange_segment": "nse_cm", "neo_symbol": "Nifty 50"},
     "BANKNIFTY":   {"instrument_token": "26009", "exchange_segment": "nse_cm", "neo_symbol": "Nifty Bank"},
@@ -231,7 +187,6 @@ INSTRUMENT_TOKENS = {
     "VIX":         {"instrument_token": "26017", "exchange_segment": "nse_cm", "neo_symbol": "INDIA VIX"},
 }
 
-# ── Pydantic Request Models ───────────────────────────────────────────────────
 class LoginRequest(BaseModel):
     access_token: str; mobile: str; ucc: str; totp: str
 
@@ -273,7 +228,6 @@ def get_session(sid):
         raise HTTPException(status_code=401, detail="Session expired. Login again.")
     return sessions[sid]
 
-# ── Serve Frontend ────────────────────────────────────────────────────────────
 BOT_HTML = open("bot.html").read() if os.path.exists("bot.html") else "<h1>bot.html missing</h1>"
 
 @app.get("/", response_class=HTMLResponse)
@@ -284,7 +238,6 @@ async def serve_ui():
 async def health():
     return {"status": "NEXUS v3 Running", "version": "3.0.0", "time": datetime.now().isoformat()}
 
-# ── AUTH ──────────────────────────────────────────────────────────────────────
 @app.post("/auth/login")
 async def login(req: LoginRequest):
     async with httpx.AsyncClient(timeout=15) as c:
@@ -335,7 +288,6 @@ async def validate(req: ValidateRequest):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-
 @app.post("/auth/check")
 async def auth_check(req: CheckRequest):
     sess = sessions.get(req.session_id)
@@ -352,11 +304,9 @@ async def auth_check(req: CheckRequest):
         "ttl_hours":   SESSION_TTL_HOURS,
     }
 
-
 class RehydrateRequest(BaseModel):
     session_id:    str
     session_blob:  dict
-
 
 @app.post("/auth/rehydrate")
 async def auth_rehydrate(req: RehydrateRequest):
@@ -377,8 +327,6 @@ async def auth_rehydrate(req: RehydrateRequest):
     logger.info(f"session rehydrated: {req.session_id} (age {age_h:.1f}h)")
     return {"alive": True, "session_id": req.session_id, "age_hours": round(age_h, 2)}
 
-
-# ── WALLET / LIMITS ───────────────────────────────────────────────────────────
 WALLET_ALIASES = {
     "avlCash":   ["avlCash", "AvailableCash", "availableCash", "Net", "net",
                   "Cash", "cash", "CashAvailable", "cashAvailable",
@@ -392,7 +340,6 @@ WALLET_ALIASES = {
     "rmsVldtd":  ["rmsVldtd", "RmsValidate", "rmsValidate", "rms", "RmsVldtd"],
 }
 
-
 def _clean_num(v):
     if isinstance(v, (int, float)):
         return v
@@ -404,7 +351,6 @@ def _clean_num(v):
         except ValueError:
             return v
     return v
-
 
 @app.post("/wallet/limits")
 async def limits(req: SessionRequest):
@@ -463,10 +409,7 @@ async def limits(req: SessionRequest):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-
-# ── V2 ELIGIBLE QUOTE HELPERS ────────────────────────────────────────────────
 async def _get_quote_item(c: httpx.AsyncClient, sess: dict, neo_symbol: str, exch: str):
-    """Retrieve quote items safely via /script-details/1.0/quotes."""
     base = sess["base_url"].rstrip("/")
     url = f"{base}/script-details/1.0/quotes/neosymbol/{exch}|{neo_symbol}/ltp"
     headers = {
@@ -492,7 +435,6 @@ async def _get_quote_item(c: httpx.AsyncClient, sess: dict, neo_symbol: str, exc
         return None, f"unexpected item shape: {str(item)[:200]}"
     return item, None
 
-
 async def _ltp_via_script_details(c: httpx.AsyncClient, sess: dict, neo_symbol: str, exch: str):
     item, err = await _get_quote_item(c, sess, neo_symbol, exch)
     if err or not item:
@@ -501,7 +443,6 @@ async def _ltp_via_script_details(c: httpx.AsyncClient, sess: dict, neo_symbol: 
         return float(item.get("ltp") or 0), None
     except (TypeError, ValueError) as e:
         return None, f"ltp parse: {e}"
-
 
 async def _ohlc_via_script_details(c: httpx.AsyncClient, sess: dict, neo_symbol: str, exch: str):
     base = sess["base_url"].rstrip("/")
@@ -522,7 +463,6 @@ async def _ohlc_via_script_details(c: httpx.AsyncClient, sess: dict, neo_symbol:
         return data.get("data", data) if isinstance(data.get("data"), dict) else data, None
     return None, f"unexpected shape: {str(data)[:120]}"
 
-
 async def _ohlc_via_quick_quotes(c: httpx.AsyncClient, sess: dict, inst_token_dict: dict):
     neo_symbol = inst_token_dict.get("neo_symbol")
     exch = inst_token_dict.get("exchange_segment")
@@ -530,9 +470,7 @@ async def _ohlc_via_quick_quotes(c: httpx.AsyncClient, sess: dict, inst_token_di
         return None, "invalid inst token format"
     return await _ohlc_via_script_details(c, sess, neo_symbol, exch)
 
-
 async def _fetch_batch_quotes(c: httpx.AsyncClient, sess: dict, queries: list[str], filter_name: str = "all"):
-    """Fetch indices in bulk to respect the 10 req/s rate limits."""
     base = sess["base_url"].rstrip("/")
     query_str = ",".join(queries)
     url = f"{base}/script-details/1.0/quotes/neosymbol/{query_str}/{filter_name}"
@@ -544,12 +482,10 @@ async def _fetch_batch_quotes(c: httpx.AsyncClient, sess: dict, queries: list[st
         r = await c.get(url, headers=headers)
     except httpx.HTTPError as e:
         return None, f"transport: {type(e).__name__}: {e}"
-    
     data, err = safe_json(r)
     if err:
         return None, err
     return data, None
-
 
 _YAHOO_SYM = {
     "NIFTY":  "^NSEI",
@@ -559,13 +495,10 @@ _YAHOO_SYM = {
 _YAHOO_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
              "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
-
 async def _ohlc_via_yahoo(c: httpx.AsyncClient, instrument: str):
     sym = _YAHOO_SYM.get(instrument.upper())
     if not sym:
         return None, f"no yahoo symbol for {instrument}"
-    
-    # Explicitly URL-encode unsafe caret '^' to '%5E' to prevent transport errors in httpx
     sym_encoded = sym.replace("^", "%5E")
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sym_encoded}?interval=1d&range=1d"
     try:
@@ -589,8 +522,6 @@ async def _ohlc_via_yahoo(c: httpx.AsyncClient, instrument: str):
         "prev_close": meta.get("regularMarketPreviousClose") or meta.get("chartPreviousClose"),
     }, None
 
-
-# ── REWRITTEN COMPLIANT SINGLE QUOTE ENDPOINTS ───────────────────────────────
 @app.post("/quotes/ltp")
 async def get_ltp(req: QuoteRequest):
     sess = get_session(req.session_id)
@@ -605,7 +536,6 @@ async def get_ltp(req: QuoteRequest):
             return {"success": True, "instrument": req.instrument, "data": item}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/quotes/ohlc")
 async def get_ohlc(req: QuoteRequest):
@@ -622,18 +552,13 @@ async def get_ohlc(req: QuoteRequest):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-
-# ── CONSOLIDATED MARKET DATA ROUTER ──────────────────────────────────────────
 @app.post("/quotes/market_data")
 async def get_market_data(req: QuoteRequest):
     inst = INSTRUMENT_TOKENS.get(req.instrument.upper())
     vix  = INSTRUMENT_TOKENS["VIX"]
     if not inst:
         raise HTTPException(status_code=400, detail=f"Unknown instrument: {req.instrument}")
-
     sess = get_session(req.session_id)
-
-    # Maintain background WebSocket ticks subscription for Nifty + VIX on every poll
     if sess:
         try:
             asyncio.create_task(get_streamer(req.session_id))
@@ -642,61 +567,47 @@ async def get_market_data(req: QuoteRequest):
                 asyncio.create_task(s_ws.subscribe([inst, vix]))
         except Exception:
             pass
-
     async with httpx.AsyncClient(timeout=15) as c:
-        # Group both queries into a single REST call to respect rate limits
         queries = [
             f"{inst['exchange_segment']}|{inst['neo_symbol']}",
             f"{vix['exchange_segment']}|{vix['neo_symbol']}"
         ]
         batch_data, batch_err = await _fetch_batch_quotes(c, sess, queries, "all")
-        # Fetch Nifty and VIX from Yahoo Finance in parallel as a non-authenticated backup
         results = await asyncio.gather(
             _ohlc_via_yahoo(c, req.instrument),
             _ohlc_via_yahoo(c, "VIX"),
             return_exceptions=True
         )
-        
         yahoo_data, yahoo_err = results[0] if not isinstance(results[0], Exception) else (None, str(results[0]))
         yahoo_vix, yahoo_vix_err = results[1] if not isinstance(results[1], Exception) else (None, str(results[1]))
-
-    # Extract individual items from the batch response using normalized matching
     ltp_item = None
     vix_item = None
-    
     target_inst_clean = _clean_symbol(inst["neo_symbol"])
     target_vix_clean  = _clean_symbol(vix["neo_symbol"])
-
     if isinstance(batch_data, list):
         for item in batch_data:
             if not isinstance(item, dict):
                 continue
             exch = item.get("exchange", "") or ""
             token = item.get("exchange_token", "") or ""
-            
             exch_clean = exch.lower().strip()
             token_clean = _clean_symbol(token)
-            
             if exch_clean == inst["exchange_segment"].lower().strip() and token_clean == target_inst_clean:
                 ltp_item = item
             elif exch_clean == vix["exchange_segment"].lower().strip() and (token_clean == target_vix_clean or "vix" in token_clean):
                 vix_item = item
-
     ltp_inst = None
     if isinstance(ltp_item, dict):
         try:
             ltp_inst = float(ltp_item.get("ltp") or 0)
         except (TypeError, ValueError):
             ltp_inst = None
-
     ltp_vix = None
     if isinstance(vix_item, dict):
         try:
             ltp_vix = float(vix_item.get("ltp") or 0)
         except (TypeError, ValueError):
             ltp_vix = None
-
-    # 1. VIX REST Fallback: If VIX is missing, try a SINGLE fallback REST call
     if ltp_vix is None or ltp_vix <= 0:
         async with httpx.AsyncClient(timeout=8) as c:
             vix_single, _ = await _get_quote_item(c, sess, "INDIA VIX", vix["exchange_segment"])
@@ -708,8 +619,6 @@ async def get_market_data(req: QuoteRequest):
                         vix_item = vix_single
                 except (TypeError, ValueError):
                     pass
-
-    # 2. VIX WebSocket Fallback: If VIX is still 0 from REST, extract from active WS cache
     if ltp_vix is None or ltp_vix <= 0:
         try:
             s_ws = streamers.get(req.session_id)
@@ -719,20 +628,14 @@ async def get_market_data(req: QuoteRequest):
                     ltp_vix = v_tick["ltp"]
         except Exception:
             pass
-
-    # 3. VIX Yahoo Finance Fallback: If VIX is still 0 after all Kotak REST & WS checks, read from Yahoo
     if ltp_vix is None or ltp_vix <= 0:
         if isinstance(yahoo_vix, dict) and yahoo_vix.get("ltp"):
             ltp_vix = yahoo_vix["ltp"]
             logger.info(f"Retrieved VIX LTP as {ltp_vix} from Yahoo Finance backup.")
-
-    # 4. Safe Default: If Kotak, WS, and Yahoo all fail/are blocked, default to a stable VIX baseline
     if ltp_vix is None or ltp_vix <= 0:
         ltp_vix = 15.00
         logger.info("VIX defaulted to stable baseline 15.00 (Kotak REST, WS, and Yahoo all returned 0/error).")
-
     err_inst = batch_err if not ltp_inst else None
-
     def _pick(item, *keys):
         if not isinstance(item, dict):
             return None
@@ -745,50 +648,40 @@ async def get_market_data(req: QuoteRequest):
                 except (TypeError, ValueError):
                     continue
         return None
-
-    # Retrieve nested OHLC properties from Kotak or fall back to Flat/Yahoo properties
     kotak_ohlc = ltp_item.get("ohlc") if isinstance(ltp_item, dict) else None
-
     def _from_any(*keys):
         for src in (yahoo_data, kotak_ohlc, ltp_item):
             v = _pick(src, *keys)
             if v is not None:
                 return v
         return None
-
     real_open  = _from_any("o", "op", "open", "openPrice", "open_price")
     real_high  = _from_any("h", "hp", "high", "highPrice", "dayHigh", "high_price")
     real_low   = _from_any("l", "lp", "low",  "lowPrice",  "dayLow",  "low_price")
     prev_close = _from_any("c",  "close", "prevClose", "previousClose", "prev_close",
                            "previous_close", "closePrice", "yc", "ycp", "cls", "prevclose")
-    
     direct_change_pct = _from_any("ncp", "nc", "pc", "pchg", "per_change", "perChange",
                                   "percentChange", "pricePctChange", "chgper", "chgPct", "chgPercent")
     direct_change_abs = _from_any("chg", "ch", "cng", "change", "absoluteChange",
                                   "priceChange", "ltpChange", "chgVal")
-
     logger.info(
         f"market_data ohlc (BATCHED): inst={req.instrument} ltp={ltp_inst} "
         f"open={real_open} high={real_high} low={real_low} prev_close={prev_close} "
         f"yahoo_ok={bool(yahoo_data)} yahoo_err={yahoo_err}"
     )
-
     if ltp_inst is not None and ltp_inst > 0:
         stats = tick_recorder.record(req.instrument.upper(), ltp_inst)
         if ltp_vix and ltp_vix > 0:
             tick_recorder.record("VIX", ltp_vix)
-
         if direct_change_pct is not None:
             change_pct = direct_change_pct
         else:
             ref = prev_close or real_open or stats.get("open") or ltp_inst
             change_pct = ((ltp_inst - ref) / ref * 100) if ref else 0.0
-
         if direct_change_abs is not None:
             change_abs = direct_change_abs
         else:
             change_abs = (ltp_inst - prev_close) if prev_close else 0
-
         return {
             "success":     True,
             "instrument":  req.instrument,
@@ -808,21 +701,16 @@ async def get_market_data(req: QuoteRequest):
             "raw_yahoo":    yahoo_data,
             "yahoo_error":  yahoo_err,
         }
-
-    # Backup single-leg REST call if the batch fails entirely
     async with httpx.AsyncClient(timeout=10) as c:
         single_item, single_err = await _get_quote_item(c, sess, inst["neo_symbol"], inst["exchange_segment"])
-    
     if isinstance(single_item, dict) and float(single_item.get("ltp") or 0) > 0:
         ltp_inst = float(single_item["ltp"])
         stats = tick_recorder.record(req.instrument.upper(), ltp_inst)
         kotak_ohlc = single_item.get("ohlc")
-        
         real_open  = _pick(kotak_ohlc, "open") or _pick(single_item, "open") or (yahoo_data.get("open") if yahoo_data else None)
         real_high  = _pick(kotak_ohlc, "high") or _pick(single_item, "high") or (yahoo_data.get("high") if yahoo_data else None)
         real_low   = _pick(kotak_ohlc, "low")  or _pick(single_item, "low")  or (yahoo_data.get("low")  if yahoo_data else None)
         prev_close = _pick(kotak_ohlc, "close") or _pick(single_item, "close", "prev_close") or (yahoo_data.get("prev_close") if yahoo_data else None)
-
         change_pct = ((ltp_inst - prev_close) / prev_close * 100) if prev_close else 0.0
         return {
             "success":     True,
@@ -841,8 +729,6 @@ async def get_market_data(req: QuoteRequest):
             "source":      "single/backup",
             "raw_ltp_item": single_item,
         }
-
-    # Backup WebSocket connection if REST remains unavailable
     try:
         s = await get_streamer(req.session_id)
         await s.subscribe([inst, vix])
@@ -859,7 +745,6 @@ async def get_market_data(req: QuoteRequest):
         ws_status = s.status()
     except Exception as e:
         ws_status = {"error": f"{type(e).__name__}: {e}"}
-
     return {
         "success": False,
         "instrument": req.instrument,
@@ -869,8 +754,6 @@ async def get_market_data(req: QuoteRequest):
         "ws": ws_status,
     }
 
-
-# ── GLOBAL NEWS LEXICON DICTIONARIES (FIXED - ADDED BACK IN) ──────────────────
 _BULL_WORDS = {"surge", "rally", "gain", "gains", "upgrade", "beat", "beats", "record",
                "high", "strong", "rises", "jumps", "jump", "soars", "soar", "outperform",
                "buy", "positive", "bullish", "accelerate", "recover", "recovery"}
@@ -878,10 +761,13 @@ _BEAR_WORDS = {"plunge", "fall", "falls", "drop", "drops", "downgrade", "miss", 
                "weak", "cuts", "tumbles", "tumble", "slumps", "slump", "loss", "losses",
                "sell", "negative", "bearish", "decline", "sink", "sinks", "crash"}
 
+_news_cache: dict[str, tuple[float, dict]] = {}
+_tg_cache: dict[str, tuple[float, dict]] = {}
+TG_TTL = 180
+NEWS_TTL = 300
 
 class NewsSentimentRequest(BaseModel):
     instrument: str = "NIFTY"
-
 
 @app.post("/news/sentiment")
 async def news_sentiment(req: NewsSentimentRequest):
@@ -890,7 +776,6 @@ async def news_sentiment(req: NewsSentimentRequest):
     hit = _news_cache.get(key)
     if hit and hit[0] > now:
         return {**hit[1], "cached": True}
-
     query_g = f"{key}+nifty+nse" if key != "NIFTY" else "NIFTY+nse+india"
     query_b = f"{key} nifty nse india"
     sources = [
@@ -918,7 +803,6 @@ async def news_sentiment(req: NewsSentimentRequest):
             except httpx.HTTPError as e:
                 errs.append(f"{src_name}:{type(e).__name__}")
     err = "; ".join(errs) if not headlines and errs else None
-
     score = 0.0
     matched = 0
     for h in headlines:
@@ -929,7 +813,6 @@ async def news_sentiment(req: NewsSentimentRequest):
             matched += 1
             score += (b - s) / max(b + s, 1)
     sentiment = round(score / matched, 3) if matched else 0.0
-
     payload = {
         "sentiment_score": sentiment,
         "headlines":       headlines[:8],
@@ -942,27 +825,18 @@ async def news_sentiment(req: NewsSentimentRequest):
     _news_cache[key] = (now + NEWS_TTL, payload)
     return payload
 
-
-# ── TELEGRAM CHANNEL SENTIMENT ──────────────────────────────────────────────
-_tg_cache: dict[str, tuple[float, dict]] = {}
-TG_TTL = 180
-
-
 class TelegramNewsRequest(BaseModel):
     channel: str
-
 
 @app.post("/news/telegram")
 async def news_telegram(req: TelegramNewsRequest):
     channel = (req.channel or "").lstrip("@").strip()
     if not channel:
         return {"ok": False, "error": "channel name required"}
-
     now = time.monotonic()
     hit = _tg_cache.get(channel)
     if hit and hit[0] > now:
         return {**hit[1], "cached": True}
-
     url = f"https://t.me/s/{channel}"
     headers = {"User-Agent": _YAHOO_UA, "Accept": "text/html,*/*"}
     try:
@@ -972,7 +846,6 @@ async def news_telegram(req: TelegramNewsRequest):
         return {"ok": False, "error": f"{type(e).__name__}: {e}", "channel": channel}
     if r.status_code != 200:
         return {"ok": False, "error": f"HTTP {r.status_code}", "channel": channel}
-
     raw_msgs = re.findall(
         r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>',
         r.text, re.DOTALL
@@ -984,7 +857,6 @@ async def news_telegram(req: TelegramNewsRequest):
             "error":   "no messages parsed",
             "html_size": len(r.text),
         }
-
     headlines: list[str] = []
     for body in raw_msgs[-30:]:
         clean = re.sub(r"<br\s*/?>", " ", body, flags=re.I)
@@ -993,7 +865,6 @@ async def news_telegram(req: TelegramNewsRequest):
         clean = re.sub(r"\s+", " ", clean).strip()
         if clean and len(clean) >= 10:
             headlines.append(clean[:280])
-
     score, matched = 0.0, 0
     for h in headlines:
         words = set(w.lower() for w in re.findall(r"[A-Za-z]+", h))
@@ -1003,7 +874,6 @@ async def news_telegram(req: TelegramNewsRequest):
             matched += 1
             score += (b - s) / max(b + s, 1)
     sentiment = round(score / matched, 3) if matched else 0.0
-
     payload = {
         "ok":              True,
         "channel":         channel,
@@ -1017,7 +887,6 @@ async def news_telegram(req: TelegramNewsRequest):
     _tg_cache[channel] = (now + TG_TTL, payload)
     return payload
 
-
 @app.post("/quotes/stream_status")
 async def stream_status(req: SessionRequest):
     s = streamers.get(req.session_id)
@@ -1025,7 +894,6 @@ async def stream_status(req: SessionRequest):
         return {"running": False, "message": "no streamer for this session"}
     return {"running": True, **s.status()}
 
-# ── SEARCH SCRIP ──────────────────────────────────────────────────────────────
 @app.post("/scrip/search")
 async def search_scrip(req: SearchRequest):
     sess = get_session(req.session_id)
@@ -1046,13 +914,11 @@ async def search_scrip(req: SearchRequest):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-# ── OPTION CHAIN ─────────────────────────────────────────────────────────────
 class ChainRequest(BaseModel):
     session_id: str
     instrument: str = "NIFTY"
     spot:       float = 0.0
     n_strikes:  int = 5
-
 
 @app.post("/chain/quotes")
 async def chain_quotes_legacy(req: ChainRequest):
@@ -1062,6 +928,8 @@ async def chain_quotes_legacy(req: ChainRequest):
     )
     return await chain_atm(req2)
 
+def _fo_segment(instrument: str) -> str:
+    return "bse_fo" if instrument.upper() == "SENSEX" else "nse_fo"
 
 @app.post("/chain/atm")
 async def chain_atm(req: ChainRequest):
@@ -1069,7 +937,6 @@ async def chain_atm(req: ChainRequest):
     inst = INSTRUMENT_TOKENS.get(req.instrument.upper())
     if not inst:
         raise HTTPException(status_code=400, detail=f"Unknown instrument: {req.instrument}")
-
     spot = req.spot
     if spot <= 0:
         async with httpx.AsyncClient(timeout=10) as c:
@@ -1077,13 +944,11 @@ async def chain_atm(req: ChainRequest):
             if ltp is None or ltp <= 0:
                 return {"success": False, "error": f"spot fetch failed: {err}", "instrument": req.instrument}
             spot = ltp
-
     try:
         chain_meta = await scrip_master.find_atm_chain(sess, req.instrument, spot, n=req.n_strikes)
     except Exception as e:
         logger.error(f"chain/atm scrip master: {e}")
         return {"success": False, "error": f"scrip master: {e}", "instrument": req.instrument, "spot": spot}
-
     if not chain_meta["strikes"]:
         return {
             "success": False,
@@ -1091,19 +956,16 @@ async def chain_atm(req: ChainRequest):
             "instrument": req.instrument, "spot": spot,
             "scrip_status": "ok",
         }
-
     legs: list[tuple[str, str, dict]] = []
     for row in chain_meta["strikes"]:
         for side in ("ce", "pe"):
             leg = row.get(side)
             if leg and leg.get("p_symbol"):
                 legs.append((str(row["strike"]), side, leg))
-
     out_strikes: dict[float, dict] = {
         r["strike"]: {"strike": r["strike"], "atm": r["strike"] == chain_meta["atm"], "ce": None, "pe": None}
         for r in chain_meta["strikes"]
     }
-
     fo_seg = _fo_segment(req.instrument)
     async with httpx.AsyncClient(timeout=15) as c:
         for i in range(0, len(legs), 8):
@@ -1126,7 +988,6 @@ async def chain_atm(req: ChainRequest):
                 }
             if i + 8 < len(legs):
                 await asyncio.sleep(1.0)
-
     return {
         "success":    True,
         "instrument": req.instrument,
@@ -1137,38 +998,30 @@ async def chain_atm(req: ChainRequest):
         "strikes":    [out_strikes[r["strike"]] for r in chain_meta["strikes"]],
     }
 
-
-# ── RISK ENGINE WRAPPERS ─────────────────────────────────────────────────────
 class RiskBookRequest(BaseModel):
     pnl: float
-
 
 class RiskCheckRequest(BaseModel):
     required_margin: float = 0.0
 
-
 @app.get("/risk/state")
 async def risk_state():
     return risk_engine.state()
-
 
 @app.post("/risk/check")
 async def risk_check(req: RiskCheckRequest):
     ok, reason = risk_engine.can_trade(req.required_margin)
     return {"allowed": ok, "reason": reason, "state": risk_engine.state()}
 
-
 @app.post("/risk/book")
 async def risk_book(req: RiskBookRequest):
     risk_engine.book_trade(req.pnl)
     return {"success": True, "state": risk_engine.state()}
 
-
 @app.post("/risk/reset_day")
 async def risk_reset_day():
     risk_engine.reset_day()
     return {"success": True, "state": risk_engine.state()}
-
 
 @app.get("/scrip/status")
 async def scrip_status():
@@ -1179,7 +1032,6 @@ async def scrip_status():
         "paths_cached":          scrip_master._paths_cache[0] if scrip_master._paths_cache else None,
     }
 
-# ── POSITIONS ─────────────────────────────────────────────────────────────────
 @app.post("/positions")
 async def positions(req: SessionRequest):
     sess = get_session(req.session_id)
@@ -1194,7 +1046,6 @@ async def positions(req: SessionRequest):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-# ── ORDERS ────────────────────────────────────────────────────────────────────
 @app.post("/orders/list")
 async def orders_list(req: SessionRequest):
     sess = get_session(req.session_id)
@@ -1221,7 +1072,6 @@ async def place_order(req: OrderRequest):
              "mp": req.market_protection, "pc": req.product, "pf": req.pf,
              "pr": req.price, "pt": req.order_type, "qt": req.quantity,
              "rt": req.validity, "tp": req.trigger_price, "ts": req.trading_symbol, "tt": req.transaction_type}
-
     debug = []
     url = f"{sess['base_url']}/quick/order/rule/ms/place"
     debug.append({
@@ -1237,8 +1087,6 @@ async def place_order(req: OrderRequest):
         "jdata_keys":  sorted(jData.keys()),
     })
     logger.info(f"order/place pre: ts={req.trading_symbol} tt={req.transaction_type} qt={req.quantity} pt={req.order_type}")
-
-    # Pass as literal raw string payload to bypass double-encoding errors on Kotak side
     body = f"jData={json.dumps(jData)}"
     debug[-1]["body_size"] = len(body)
     async with httpx.AsyncClient(timeout=15) as c:
@@ -1249,12 +1097,11 @@ async def place_order(req: OrderRequest):
                          "Auth": sess["session_token"], "Sid": sess["session_sid"],
                          "neo-fin-key": NEO_FIN_KEY,
                          "Content-Type": "application/x-www-form-urlencoded"},
-                content=body)
+                data={"jData": json.dumps(jData)})
         except httpx.HTTPError as e:
             debug.append({"step": "transport_error", "kind": type(e).__name__, "msg": str(e)})
             logger.warning(f"order/place transport_error: {type(e).__name__}: {e}")
             return {"success": False, "stat": "Not_Ok", "error": f"{type(e).__name__}: {e}", "debug": debug}
-        
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         debug.append({
             "step":         "http_response",
@@ -1263,7 +1110,6 @@ async def place_order(req: OrderRequest):
             "body_snippet": (r.text or "")[:500],
             "elapsed_ms":   elapsed_ms,
         })
-
         result, err = safe_json(r)
         debug.append({
             "step":          "parsed",
@@ -1274,15 +1120,12 @@ async def place_order(req: OrderRequest):
             "stCode":        result.get("stCode") if isinstance(result, dict) else None,
             "emsg":          result.get("emsg") if isinstance(result, dict) else None,
         })
-
         if err:
             logger.warning(f"order/place parse_error http={r.status_code} err={err}")
             return {"success": False, "stat": "Not_Ok", "error": err, "debug": debug}
-
         if isinstance(result, dict) and result.get("stat") == "Ok":
             logger.info(f"Order placed: {result}")
             return {**result, "debug": debug}
-
         logger.warning(
             f"order/place NOT OK http={r.status_code} stCode={result.get('stCode') if isinstance(result, dict) else '?'} "
             f"emsg={result.get('emsg') if isinstance(result, dict) else '?'}"
@@ -1300,7 +1143,7 @@ async def cancel_order(req: CancelRequest):
                 headers={"accept": "application/json",
                          "Auth": sess["session_token"], "Sid": sess["session_sid"],
                          "neo-fin-key": NEO_FIN_KEY, "Content-Type": "application/x-www-form-urlencoded"},
-                content=f"jData={json.dumps({'am': req.am, 'on': req.order_no})}")
+                data={"jData": json.dumps({"am": req.am, "on": req.order_no})})
             data, err = safe_json(r)
             if err:
                 return {"success": False, "error": err}
@@ -1308,40 +1151,31 @@ async def cancel_order(req: CancelRequest):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-
-# ── ORDER PLACEMENT TEST / SANITY GATE ───────────────────────────────────────
 class TestPlaceRequest(BaseModel):
     session_id: str
     instrument: str = "NIFTY"
     price:      float = 0.05
     qty_lots:   int   = 1
 
-
 @app.post("/orders/test_place")
 async def test_place(req: TestPlaceRequest):
     sess = get_session(req.session_id)
-
-    # 1. Resolve a tradable ATM CE symbol.
     inst = INSTRUMENT_TOKENS.get(req.instrument.upper())
     if not inst:
         raise HTTPException(status_code=400, detail=f"Unknown instrument: {req.instrument}")
-
     spot = 0.0
     async with httpx.AsyncClient(timeout=15) as c:
         ltp, err = await _ltp_via_script_details(c, sess, inst["neo_symbol"], inst["exchange_segment"])
         if not ltp or ltp <= 0:
             return {"success": False, "stage": "spot_fetch", "error": err or "spot is 0"}
         spot = ltp
-
     try:
         chain_meta = await scrip_master.find_atm_chain(sess, req.instrument, spot, n=2)
     except Exception as e:
         return {"success": False, "stage": "scrip_master", "error": str(e), "spot": spot}
-
     atm_row = next((s for s in chain_meta["strikes"] if s["strike"] == chain_meta["atm"] and s.get("ce")), None)
     if not atm_row:
         return {"success": False, "stage": "atm_lookup", "error": "no ATM CE in scrip master", "spot": spot}
-
     ce = atm_row["ce"]
     pTrdSymbol = ce["p_trd_symbol"]
     pSymbol    = ce["p_symbol"]
@@ -1349,14 +1183,11 @@ async def test_place(req: TestPlaceRequest):
     default_lot = 20 if req.instrument.upper() == "SENSEX" else 75
     lot_size   = ce["lot_size"] or default_lot
     qty        = req.qty_lots * lot_size
-
-    # Fetch option LTP to establish a safe margin distance limit
     async with httpx.AsyncClient(timeout=10) as c:
         opt_ltp, _ = await _ltp_via_script_details(c, sess, pSymbol, fo_seg)
     safe_limit = req.price
     if opt_ltp and opt_ltp > 0:
         safe_limit = max(0.05, round(opt_ltp * 0.95, 2))
-
     place_url = f"{sess['base_url']}/quick/order/rule/ms/place"
     jData = {
         "am": "NO", "dq": "0", "es": fo_seg, "mp": "0",
@@ -1379,7 +1210,6 @@ async def test_place(req: TestPlaceRequest):
         "spot":       spot,
         "expiry":     chain_meta.get("expiry"),
     }
-    
     body = f"jData={json.dumps(jData)}"
     place_diag["body_size"] = len(body)
     async with httpx.AsyncClient(timeout=20) as c:
@@ -1389,23 +1219,20 @@ async def test_place(req: TestPlaceRequest):
                          "Auth": sess["session_token"], "Sid": sess["session_sid"],
                          "neo-fin-key": NEO_FIN_KEY,
                          "Content-Type": "application/x-www-form-urlencoded"},
-                content=body)
+                data={"jData": json.dumps(jData)})
         except httpx.HTTPError as e:
             place_diag["transport_error"] = f"{type(e).__name__}: {e}"
             return {"success": False, "stage": "place_http", **place_diag}
-
         place_diag["http_status"]    = r.status_code
         place_diag["content_type"]   = r.headers.get("content-type", "")
         place_diag["body_snippet"]   = (r.text or "")[:600]
         body, parse_err = safe_json(r)
         place_diag["parse_error"]    = parse_err
         place_diag["body"]           = body
-
     order_no = None
     if isinstance(body, dict):
         order_no = body.get("nOrdNo") or body.get("orderNo") or body.get("ordNo")
     place_diag["order_no"] = order_no
-
     cancel_diag: dict = {}
     if order_no:
         async with httpx.AsyncClient(timeout=15) as c:
@@ -1415,7 +1242,7 @@ async def test_place(req: TestPlaceRequest):
                              "Auth": sess["session_token"], "Sid": sess["session_sid"],
                              "neo-fin-key": NEO_FIN_KEY,
                              "Content-Type": "application/x-www-form-urlencoded"},
-                    content=f"jData={json.dumps({'am': 'NO', 'on': str(order_no)})}")
+                    data={"jData": json.dumps({"am": "NO", "on": str(order_no)})})
                 cb, cerr = safe_json(cr)
                 cancel_diag = {
                     "http_status": cr.status_code,
@@ -1424,7 +1251,6 @@ async def test_place(req: TestPlaceRequest):
                 }
             except httpx.HTTPError as e:
                 cancel_diag = {"transport_error": f"{type(e).__name__}: {e}"}
-
     accepted = bool(order_no)
     rejected_reason = None
     if not accepted and isinstance(body, dict):
@@ -1441,8 +1267,55 @@ async def test_place(req: TestPlaceRequest):
         "cancel":           cancel_diag,
     }
 
+class ResolveStrikeRequest(BaseModel):
+    session_id: str
+    instrument: str
+    strike:     float
+    side:       str
 
-# ── COMPLETED TRADES ──────────────────────────────────────────────────────────
+@app.post("/chain/resolve_strike")
+async def resolve_strike(req: ResolveStrikeRequest):
+    sess = get_session(req.session_id)
+    inst = INSTRUMENT_TOKENS.get(req.instrument.upper())
+    if not inst:
+        raise HTTPException(status_code=400, detail=f"Unknown instrument: {req.instrument}")
+    side = req.side.upper()
+    if side not in ("CE", "PE"):
+        raise HTTPException(status_code=400, detail="side must be CE or PE")
+    async with httpx.AsyncClient(timeout=10) as c:
+        spot, err = await _ltp_via_script_details(c, sess, inst["neo_symbol"], inst["exchange_segment"])
+        if not spot or spot <= 0:
+            return {"ok": False, "error": f"spot fetch failed: {err}"}
+    step = 100 if req.instrument.upper() in ("BANKNIFTY", "SENSEX") else 50
+    n = max(6, int(abs(req.strike - spot) / step) + 2)
+    try:
+        chain_meta = await scrip_master.find_atm_chain(sess, req.instrument, spot, n=n)
+    except Exception as e:
+        return {"ok": False, "error": f"scrip master: {e}"}
+    row = next((r for r in chain_meta["strikes"] if r["strike"] == req.strike), None)
+    if not row:
+        return {"ok": False, "error": f"strike {req.strike} not in chain"}
+    leg = row.get("ce") if side == "CE" else row.get("pe")
+    if not leg:
+        return {"ok": False, "error": f"no {side} leg for strike {req.strike}"}
+    fo_seg = _fo_segment(req.instrument)
+    async with httpx.AsyncClient(timeout=10) as c:
+        ltp, err = await _ltp_via_script_details(c, sess, leg["p_symbol"], fo_seg)
+    if ltp is None or ltp <= 0:
+        return {"ok": False, "error": f"option ltp: {err or 'no data'}"}
+    return {
+        "ok":            True,
+        "p_trd_symbol":  leg["p_trd_symbol"],
+        "p_symbol":      leg["p_symbol"],
+        "lot_size":      leg["lot_size"],
+        "ltp":           ltp,
+        "expiry":        chain_meta.get("expiry"),
+        "spot":          spot,
+        "strike":        req.strike,
+        "side":          side,
+        "exchange_segment": fo_seg,
+    }
+
 @app.post("/trades")
 async def trades(req: SessionRequest):
     sess = get_session(req.session_id)
