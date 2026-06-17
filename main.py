@@ -2,8 +2,10 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 import os
-import httpx, json, asyncio, time, re
-from datetime import datetime
+import httpx, json, asyncio, time, re, sqlite3, hashlib, html
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from zoneinfo import ZoneInfo
 from collections import deque
 from pydantic import BaseModel
 import logging
@@ -154,6 +156,7 @@ def _sessions_load() -> None:
 @app.on_event("startup")
 async def _on_startup():
     _sessions_load()
+    _news_db_init()
 
 from streamer import KotakStreamer
 streamers: dict[str, KotakStreamer] = {}
@@ -236,7 +239,7 @@ async def serve_ui():
 
 @app.get("/health")
 async def health():
-    return {"status": "NEXUS v3 Running", "version": "3.0.0", "time": datetime.now().isoformat()}
+    return {"status": "NEXUS Production Execution Bot Running", "version": "4.0.0-prod", "time": datetime.now().isoformat()}
 
 @app.post("/auth/login")
 async def login(req: LoginRequest):
@@ -761,69 +764,323 @@ _BEAR_WORDS = {"plunge", "fall", "falls", "drop", "drops", "downgrade", "miss", 
                "weak", "cuts", "tumbles", "tumble", "slumps", "slump", "loss", "losses",
                "sell", "negative", "bearish", "decline", "sink", "sinks", "crash"}
 
+
 _news_cache: dict[str, tuple[float, dict]] = {}
-_tg_cache: dict[str, tuple[float, dict]] = {}
+_tg_cache: dict[str, tuple[float, dict]] = {}  # legacy endpoint kept but not used by execution
 TG_TTL = 180
-NEWS_TTL = 300
+NEWS_TTL = 60
+NEWS_MAX_AGE_SECONDS = int(os.environ.get("NEWS_MAX_AGE_SECONDS", "300"))
+NEWS_DB_FILE = os.environ.get("NEWS_DB_FILE", "news_memory.db")
+
+# Free near-live sources. Reality check: free RSS may publish late; the bot rejects
+# old items instead of pretending they are live. News is confirmation, not a trade trigger.
+_FREE_NEWS_SOURCES = [
+    ("google_nifty", "https://news.google.com/rss/search?q=NIFTY%20OR%20SENSEX%20OR%20RBI%20OR%20FII%20OR%20DII%20when:15m&hl=en-IN&gl=IN&ceid=IN:en"),
+    ("google_market", "https://news.google.com/rss/search?q=Indian%20stock%20market%20NSE%20BSE%20when:15m&hl=en-IN&gl=IN&ceid=IN:en"),
+    ("moneycontrol", "https://www.moneycontrol.com/rss/MCtopnews.xml"),
+    ("et_markets", "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms"),
+    ("business_standard", "https://www.business-standard.com/rss/markets-106.rss"),
+]
+
+_RELEVANCE_TERMS = {
+    "nifty", "sensex", "nse", "bse", "banknifty", "market", "markets", "stock", "stocks",
+    "rbi", "sebi", "fed", "fii", "dii", "rupee", "dollar", "usd", "crude", "oil",
+    "inflation", "cpi", "rate", "repo", "yield", "budget", "election", "global",
+    "gift", "sgx", "dow", "nasdaq", "s&p", "earnings",
+}
 
 class NewsSentimentRequest(BaseModel):
     instrument: str = "NIFTY"
+    max_age_seconds: int = NEWS_MAX_AGE_SECONDS
+    force_refresh: bool = False
+
+
+def _news_db_init() -> None:
+    try:
+        with sqlite3.connect(NEWS_DB_FILE) as con:
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS news_items (
+                    id TEXT PRIMARY KEY,
+                    source TEXT NOT NULL,
+                    headline TEXT NOT NULL,
+                    link TEXT,
+                    published_ts INTEGER,
+                    fetched_ts INTEGER NOT NULL,
+                    instrument TEXT,
+                    sentiment_score REAL DEFAULT 0,
+                    impact_score INTEGER DEFAULT 0,
+                    freshness_score INTEGER DEFAULT 0,
+                    relevance_score INTEGER DEFAULT 0,
+                    confidence_score INTEGER DEFAULT 0,
+                    used_for_trade INTEGER DEFAULT 0,
+                    reasons TEXT
+                )
+            """)
+            con.execute("CREATE INDEX IF NOT EXISTS idx_news_pub ON news_items(published_ts)")
+            con.execute("CREATE INDEX IF NOT EXISTS idx_news_inst ON news_items(instrument)")
+            con.commit()
+    except Exception as e:
+        logger.warning(f"news db init failed: {e}")
+
+
+def _strip_xml_html(text: str) -> str:
+    text = html.unescape(text or "")
+    text = re.sub(r"<!\[CDATA\[(.*?)\]\]>", r"\1", text, flags=re.S)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _parse_rss_datetime(raw: str) -> int | None:
+    raw = _strip_xml_html(raw)
+    if not raw:
+        return None
+    try:
+        dt = parsedate_to_datetime(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    except Exception:
+        pass
+    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d %H:%M:%S"):
+        try:
+            dt = datetime.strptime(raw, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp())
+        except Exception:
+            continue
+    return None
+
+
+def _extract_rss_items(xml: str, source: str) -> list[dict]:
+    items: list[dict] = []
+    blocks = re.findall(r"<item\b[^>]*>(.*?)</item>", xml, flags=re.I | re.S)
+    if not blocks:
+        blocks = re.findall(r"<entry\b[^>]*>(.*?)</entry>", xml, flags=re.I | re.S)
+    for b in blocks[:40]:
+        title_m = re.search(r"<title[^>]*>(.*?)</title>", b, flags=re.I | re.S)
+        if not title_m:
+            continue
+        headline = _strip_xml_html(title_m.group(1))
+        if len(headline) < 8:
+            continue
+        link_m = re.search(r"<link[^>]*>(.*?)</link>", b, flags=re.I | re.S)
+        link = _strip_xml_html(link_m.group(1)) if link_m else ""
+        pub = None
+        for tag in ("pubDate", "published", "updated", "dc:date"):
+            m = re.search(rf"<{tag}[^>]*>(.*?)</{tag}>", b, flags=re.I | re.S)
+            if m:
+                pub = _parse_rss_datetime(m.group(1))
+                if pub:
+                    break
+        items.append({"source": source, "headline": headline, "link": link, "published_ts": pub})
+    return items
+
+
+def _headline_score(text: str) -> tuple[float, int, list[str]]:
+    t = (text or "").lower()
+    score = 0.0
+    reasons: list[str] = []
+    # phrase dictionaries are defined below; tolerate startup order during import
+    for phrase, val in globals().get("_BULL_PHRASES", {}).items():
+        if phrase in t:
+            score += val
+            reasons.append(f"bull_phrase:{phrase}")
+    for phrase, val in globals().get("_BEAR_PHRASES", {}).items():
+        if phrase in t:
+            score += val
+            reasons.append(f"bear_phrase:{phrase}")
+    words = set(re.findall(r"[a-z]+", t))
+    bull_hits = words & _BULL_WORDS
+    bear_hits = words & _BEAR_WORDS
+    if bull_hits:
+        score += min(0.30, 0.08 * len(bull_hits))
+        reasons.append("bull_words:" + ",".join(sorted(bull_hits)[:4]))
+    if bear_hits:
+        score -= min(0.30, 0.08 * len(bear_hits))
+        reasons.append("bear_words:" + ",".join(sorted(bear_hits)[:4]))
+    impact_terms = words & globals().get("_HIGH_IMPACT_TERMS", set())
+    impact = 10 + min(90, len(impact_terms) * 18 + (20 if abs(score) >= 0.25 else 0))
+    return _clamp(score, -1.0, 1.0) if "_clamp" in globals() else max(-1, min(1, score)), impact, reasons
+
+
+def _news_relevance(headline: str, instrument: str) -> int:
+    t = (headline or "").lower()
+    words = set(re.findall(r"[a-z]+", t))
+    base = len(words & _RELEVANCE_TERMS) * 12
+    inst = instrument.lower()
+    if inst in t:
+        base += 25
+    if instrument.upper() == "NIFTY" and ("nifty" in t or "nse" in t or "indian stock" in t):
+        base += 20
+    if instrument.upper() == "SENSEX" and ("sensex" in t or "bse" in t or "indian stock" in t):
+        base += 20
+    return int(max(0, min(100, base)))
+
+
+def _freshness_score(published_ts: int | None, now_ts: int, max_age: int) -> tuple[int, int | None, bool]:
+    if not published_ts:
+        return 0, None, False
+    age = max(0, now_ts - int(published_ts))
+    if age > max_age:
+        return 0, age, False
+    return int(max(0, min(100, 100 - (age / max_age) * 100))), age, True
+
+
+def _remember_news(items: list[dict], instrument: str, max_age: int) -> list[dict]:
+    _news_db_init()
+    now_ts = int(time.time())
+    scored: list[dict] = []
+    try:
+        con = sqlite3.connect(NEWS_DB_FILE)
+    except Exception as e:
+        logger.warning(f"news db open failed: {e}")
+        con = None
+    for item in items:
+        headline = item["headline"][:500]
+        published_ts = item.get("published_ts") or now_ts  # some feeds omit pubdate; treat as fetched-now but low confidence
+        sentiment, impact, reasons = _headline_score(headline)
+        freshness, age, fresh_ok = _freshness_score(published_ts, now_ts, max_age)
+        relevance = _news_relevance(headline, instrument)
+        confidence = int(max(0, min(100, abs(sentiment) * 45 + impact * 0.25 + freshness * 0.20 + relevance * 0.20)))
+        row = {
+            **item,
+            "headline": headline,
+            "published_ts": int(published_ts),
+            "age_seconds": age,
+            "is_fresh": fresh_ok,
+            "sentiment_score": round(sentiment, 3),
+            "impact_score": impact,
+            "freshness_score": freshness,
+            "relevance_score": relevance,
+            "confidence_score": confidence,
+            "reasons": reasons[:6],
+        }
+        scored.append(row)
+        if con:
+            try:
+                nid = hashlib.sha256((item.get("source", "") + headline).encode()).hexdigest()[:32]
+                con.execute(
+                    """INSERT OR IGNORE INTO news_items
+                    (id, source, headline, link, published_ts, fetched_ts, instrument, sentiment_score,
+                     impact_score, freshness_score, relevance_score, confidence_score, reasons)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (nid, item.get("source", ""), headline, item.get("link", ""), int(published_ts), now_ts,
+                     instrument.upper(), row["sentiment_score"], impact, freshness, relevance, confidence, json.dumps(row["reasons"]))
+                )
+            except Exception as e:
+                logger.debug(f"news remember ignore: {e}")
+    if con:
+        try:
+            # keep db small
+            con.execute("DELETE FROM news_items WHERE fetched_ts < ?", (now_ts - 7 * 86400,))
+            con.commit(); con.close()
+        except Exception:
+            pass
+    return scored
+
+
+async def _fetch_free_news(instrument: str, max_age: int) -> tuple[list[dict], list[str]]:
+    errs: list[str] = []
+    ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+    # Add targeted Google query per instrument to improve relevance.
+    sources = list(_FREE_NEWS_SOURCES)
+    key = instrument.upper()
+    sources.insert(0, (f"google_{key.lower()}", f"https://news.google.com/rss/search?q={key}%20market%20India%20when:10m&hl=en-IN&gl=IN&ceid=IN:en"))
+    all_items: list[dict] = []
+    async with httpx.AsyncClient(timeout=8, headers={"User-Agent": ua, "Accept": "application/rss+xml, application/xml, text/xml, */*"}) as c:
+        for src, url in sources:
+            try:
+                r = await c.get(url, follow_redirects=True)
+                if r.status_code == 200 and r.text:
+                    all_items.extend(_extract_rss_items(r.text, src))
+                else:
+                    errs.append(f"{src}:HTTP {r.status_code}")
+            except httpx.HTTPError as e:
+                errs.append(f"{src}:{type(e).__name__}")
+    # de-duplicate by normalized headline
+    dedup = {}
+    for it in all_items:
+        k = re.sub(r"\W+", "", it["headline"].lower())[:120]
+        dedup.setdefault(k, it)
+    return list(dedup.values()), errs
+
+
+def _aggregate_scored_news(rows: list[dict], require_fresh: bool = True) -> dict:
+    usable = [r for r in rows if (r.get("is_fresh") or not require_fresh) and r.get("relevance_score", 0) >= 20]
+    weighted_sum = 0.0
+    weight_total = 0.0
+    for r in usable:
+        w = max(1, r.get("impact_score", 0)) * max(1, r.get("freshness_score", 0)) * max(1, r.get("relevance_score", 0)) / 10000
+        if abs(r.get("sentiment_score", 0)) > 0:
+            weighted_sum += r["sentiment_score"] * w
+            weight_total += w
+    final = weighted_sum / weight_total if weight_total else 0.0
+    coverage = min(100, len(usable) * 20)
+    impact = int(max([r.get("impact_score", 0) for r in usable], default=0))
+    confidence = int(max(0, min(100, abs(final) * 55 + coverage * 0.25 + impact * 0.20)))
+    bias = "BULLISH" if final >= 0.15 else "BEARISH" if final <= -0.15 else "NEUTRAL"
+    return {
+        "bias": bias,
+        "sentiment_score": round(final, 3),
+        "confidence": confidence,
+        "coverage": coverage,
+        "max_impact_score": impact,
+        "fresh_count": len([r for r in rows if r.get("is_fresh")]),
+        "usable_count": len(usable),
+        "items": sorted(usable, key=lambda x: (x.get("confidence_score", 0), x.get("freshness_score", 0)), reverse=True)[:12],
+    }
+
 
 @app.post("/news/sentiment")
 async def news_sentiment(req: NewsSentimentRequest):
     key = req.instrument.upper()
+    max_age = max(60, min(900, int(req.max_age_seconds or NEWS_MAX_AGE_SECONDS)))
     now = time.monotonic()
-    hit = _news_cache.get(key)
-    if hit and hit[0] > now:
+    hit = _news_cache.get(f"{key}:{max_age}")
+    if hit and hit[0] > now and not req.force_refresh:
         return {**hit[1], "cached": True}
-    query_g = f"{key}+nifty+nse" if key != "NIFTY" else "NIFTY+nse+india"
-    query_b = f"{key} nifty nse india"
-    sources = [
-        ("google", f"https://news.google.com/rss/search?q={query_g}&hl=en-IN&gl=IN&ceid=IN:en"),
-        ("bing",   f"https://www.bing.com/news/search?q={query_b.replace(' ', '+')}&format=rss"),
-    ]
-    headlines: list[str] = []
-    errs: list[str] = []
-    ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-          "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
-    async with httpx.AsyncClient(timeout=8, headers={"User-Agent": ua,
-                                                      "Accept": "application/rss+xml, application/xml, text/xml, */*"}) as c:
-        for src_name, url in sources:
-            try:
-                r = await c.get(url, follow_redirects=True)
-                if r.status_code == 200 and r.text:
-                    titles = re.findall(r"<title[^>]*>(.*?)</title>", r.text, re.DOTALL)
-                    cleaned = [re.sub(r"<!\[CDATA\[(.*?)\]\]>", r"\1", t).strip() for t in titles[1:11]]
-                    cleaned = [t for t in cleaned if t and len(t) > 5]
-                    if cleaned:
-                        headlines.extend(cleaned)
-                        break
-                else:
-                    errs.append(f"{src_name}:HTTP {r.status_code}")
-            except httpx.HTTPError as e:
-                errs.append(f"{src_name}:{type(e).__name__}")
-    err = "; ".join(errs) if not headlines and errs else None
-    score = 0.0
-    matched = 0
-    for h in headlines:
-        words = set(w.lower() for w in re.findall(r"[A-Za-z]+", h))
-        b = len(words & _BULL_WORDS)
-        s = len(words & _BEAR_WORDS)
-        if b or s:
-            matched += 1
-            score += (b - s) / max(b + s, 1)
-    sentiment = round(score / matched, 3) if matched else 0.0
+    raw_items, errs = await _fetch_free_news(key, max_age)
+    scored = _remember_news(raw_items, key, max_age)
+    agg = _aggregate_scored_news(scored, require_fresh=True)
     payload = {
-        "sentiment_score": sentiment,
-        "headlines":       headlines[:8],
-        "count":           len(headlines),
-        "matched":         matched,
-        "error":           err,
-        "fetched_at":      int(time.time()),
-        "cached":          False,
+        "ok": True,
+        "source_mode": "free_rss_fresh_only",
+        "instrument": key,
+        "max_age_seconds": max_age,
+        "sentiment_score": agg["sentiment_score"],
+        "bias": agg["bias"],
+        "confidence": agg["confidence"],
+        "coverage": agg["coverage"],
+        "impact_score": agg["max_impact_score"],
+        "fresh_count": agg["fresh_count"],
+        "usable_count": agg["usable_count"],
+        "total_seen": len(scored),
+        "headlines": [r["headline"] for r in agg["items"]],
+        "items": agg["items"],
+        "error": "; ".join(errs) if errs and not scored else None,
+        "fetched_at": int(time.time()),
+        "cached": False,
+        "rule": "Only news within max_age_seconds is allowed to affect the signal. Old news is stored but ignored.",
     }
-    _news_cache[key] = (now + NEWS_TTL, payload)
+    _news_cache[f"{key}:{max_age}"] = (now + NEWS_TTL, payload)
     return payload
+
+
+@app.get("/news/memory")
+async def news_memory(limit: int = 50, fresh_only: bool = False):
+    _news_db_init()
+    now_ts = int(time.time())
+    try:
+        with sqlite3.connect(NEWS_DB_FILE) as con:
+            con.row_factory = sqlite3.Row
+            where = "WHERE published_ts >= ?" if fresh_only else ""
+            params = (now_ts - NEWS_MAX_AGE_SECONDS,) if fresh_only else ()
+            rows = con.execute(f"SELECT * FROM news_items {where} ORDER BY fetched_ts DESC LIMIT ?", (*params, max(1, min(200, limit)))).fetchall()
+            return {"ok": True, "db": NEWS_DB_FILE, "count": len(rows), "items": [dict(r) for r in rows]}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "db": NEWS_DB_FILE}
 
 class TelegramNewsRequest(BaseModel):
     channel: str
@@ -915,9 +1172,7 @@ _BEAR_PHRASES = {
 class AdvancedSignalRequest(BaseModel):
     session_id: str
     instrument: str = "NIFTY"
-    telegram_channel: str = ""
-    include_telegram: bool = False
-    min_confidence: int = 75
+    min_confidence: int = 60
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -968,67 +1223,25 @@ def _macd(values: list[float]) -> dict:
     return {"macd": round(macd_line, 4), "signal": round(signal, 4) if signal is not None else None, "histogram": round(hist, 4) if hist is not None else None}
 
 
-def _headline_score(text: str) -> tuple[float, int, list[str]]:
-    t = text.lower()
-    score = 0.0
-    reasons: list[str] = []
-    for phrase, val in _BULL_PHRASES.items():
-        if phrase in t:
-            score += val
-            reasons.append(f"bull_phrase:{phrase}")
-    for phrase, val in _BEAR_PHRASES.items():
-        if phrase in t:
-            score += val
-            reasons.append(f"bear_phrase:{phrase}")
-    words = set(re.findall(r"[a-z]+", t))
-    bull_hits = words & _BULL_WORDS
-    bear_hits = words & _BEAR_WORDS
-    if bull_hits:
-        score += min(0.30, 0.08 * len(bull_hits))
-        reasons.append("bull_words:" + ",".join(sorted(bull_hits)[:4]))
-    if bear_hits:
-        score -= min(0.30, 0.08 * len(bear_hits))
-        reasons.append("bear_words:" + ",".join(sorted(bear_hits)[:4]))
-    impact = 1 + min(4, len(words & _HIGH_IMPACT_TERMS))
-    return _clamp(score, -1.0, 1.0), impact, reasons
 
-
-def _aggregate_headlines(headlines: list[str]) -> dict:
-    rows = []
-    weighted_sum = 0.0
-    weight_total = 0.0
-    for h in headlines[:20]:
-        sc, impact, reasons = _headline_score(h)
-        weight = impact
-        if abs(sc) > 0:
-            weighted_sum += sc * weight
-            weight_total += weight
-        rows.append({"headline": h, "score": round(sc, 3), "impact": impact, "reasons": reasons[:4]})
-    final = weighted_sum / weight_total if weight_total else 0.0
-    coverage = min(100, int((len([r for r in rows if abs(r["score"]) > 0]) / max(1, min(len(rows), 10))) * 100))
-    confidence = int(_clamp(abs(final) * 100 + coverage * 0.35, 0, 100))
-    return {"score": round(final, 3), "confidence": confidence, "items": rows, "coverage": coverage}
-
-
-async def _advanced_news_context(instrument: str, telegram_channel: str = "", include_telegram: bool = False) -> dict:
-    base = await news_sentiment(NewsSentimentRequest(instrument=instrument))
-    headlines = list(base.get("headlines") or [])
-    tg_payload = None
-    if include_telegram and telegram_channel:
-        tg_payload = await news_telegram(TelegramNewsRequest(channel=telegram_channel))
-        if tg_payload.get("ok"):
-            headlines.extend(tg_payload.get("headlines") or [])
-    agg = _aggregate_headlines(headlines)
-    bias = "BULLISH" if agg["score"] >= 0.18 else "BEARISH" if agg["score"] <= -0.18 else "NEUTRAL"
+# Legacy headline aggregation is intentionally bypassed. The production news layer
+# above already handles freshness, relevance, impact, confidence and SQLite memory.
+async def _advanced_news_context(instrument: str) -> dict:
+    base = await news_sentiment(NewsSentimentRequest(instrument=instrument, max_age_seconds=NEWS_MAX_AGE_SECONDS))
+    bias = base.get("bias", "NEUTRAL")
     return {
         "bias": bias,
-        "sentiment_score": agg["score"],
-        "confidence": agg["confidence"],
-        "coverage": agg["coverage"],
-        "headlines": headlines[:12],
-        "scored_items": agg["items"][:12],
+        "sentiment_score": float(base.get("sentiment_score") or 0),
+        "confidence": int(base.get("confidence") or 0),
+        "coverage": int(base.get("coverage") or 0),
+        "impact_score": int(base.get("impact_score") or 0),
+        "fresh_count": int(base.get("fresh_count") or 0),
+        "usable_count": int(base.get("usable_count") or 0),
+        "headlines": list(base.get("headlines") or [])[:12],
+        "scored_items": list(base.get("items") or [])[:12],
         "rss_error": base.get("error"),
-        "telegram": tg_payload,
+        "source": "free_rss_sqlite_fresh_only_no_telegram_no_claude",
+        "rule": base.get("rule"),
     }
 
 
@@ -1137,7 +1350,7 @@ async def advanced_signal(req: AdvancedSignalRequest):
     except Exception:
         prices = []
     technical = _technical_from_market(md, prices)
-    news = await _advanced_news_context(req.instrument, req.telegram_channel, req.include_telegram)
+    news = await _advanced_news_context(req.instrument)
     regime = _market_regime_score(md, technical)
 
     composite = (
@@ -1151,7 +1364,7 @@ async def advanced_signal(req: AdvancedSignalRequest):
         technical["confidence"] * 0.60 + news["confidence"] * 0.20 + abs(regime["score"]) * 100 * 0.10 + 10,
         0, 100
     ))
-    if confidence < req.min_confidence or abs(composite) < 0.28:
+    if confidence < req.min_confidence or abs(composite) < 0.22:
         action = "WAIT"
         option_side = None
     elif composite > 0:
@@ -1185,7 +1398,7 @@ async def advanced_signal(req: AdvancedSignalRequest):
 
 @app.post("/news/advanced")
 async def advanced_news(req: AdvancedSignalRequest):
-    return await _advanced_news_context(req.instrument, req.telegram_channel, req.include_telegram)
+    return await _advanced_news_context(req.instrument)
 
 # ======================= END ADVANCED SIGNAL ENGINE =======================
 
@@ -1453,120 +1666,356 @@ async def cancel_order(req: CancelRequest):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+class OptionFullLeg(BaseModel):
+    p_symbol: str
+    exchange: str = "nse_fo"
+
+class OptionFullRequest(BaseModel):
+    session_id: str
+    legs: list[OptionFullLeg]
+
+@app.post("/quotes/option_full")
+async def option_full(req: OptionFullRequest):
+    """Return LTP/OI/volume for option legs. Fixes UI 404 and gives the
+    technical panel OI/volume inputs. Uses Kotak script-details endpoint.
+    """
+    sess = get_session(req.session_id)
+    out = []
+    async with httpx.AsyncClient(timeout=12) as c:
+        for leg in req.legs[:20]:
+            item, err = await _get_quote_item(c, sess, leg.p_symbol, leg.exchange)
+            if not item:
+                out.append({"ok": False, "p_symbol": leg.p_symbol, "exchange": leg.exchange, "error": err})
+                continue
+            def pick(*keys):
+                ci = {str(k).lower(): k for k in item.keys()}
+                for k in keys:
+                    rk = ci.get(k.lower())
+                    if rk is not None and item.get(rk) not in (None, ""):
+                        return item.get(rk)
+                return None
+            def num(v):
+                try:
+                    return float(str(v).replace(",", ""))
+                except Exception:
+                    return 0.0
+            out.append({
+                "ok": True,
+                "p_symbol": leg.p_symbol,
+                "exchange": leg.exchange,
+                "ltp": num(pick("ltp", "last_price", "lastPrice")),
+                "oi": num(pick("oi", "openInterest", "open_interest")),
+                "vol": num(pick("volume", "vol", "v", "tradeVolume")),
+                "bid": num(pick("bid", "bp", "bestBid")),
+                "ask": num(pick("ask", "sp", "bestAsk")),
+                "raw": item,
+            })
+    return {"success": True, "legs": out}
+
+class AffordableChainRequest(BaseModel):
+    session_id: str
+    instrument: str = "NIFTY"
+    side: str = "CE"                 # CE / PE
+    n_strikes: int = 60              # deep scan to find affordable low-premium OTM contracts
+    max_deploy_pct: float = 95.0     # percent of available wallet allowed for premium debit
+    min_option_ltp: float = 0.05
+    spot: float = 0.0
+
+def _ist_now():
+    return datetime.now(ZoneInfo("Asia/Kolkata"))
+
+def _entry_window_status(bypass: bool = False) -> dict:
+    if bypass:
+        return {"allowed": True, "reason": "bypassed"}
+    now = _ist_now()
+    mins = now.hour * 60 + now.minute
+    if now.weekday() >= 5:
+        return {"allowed": False, "reason": "weekend - market closed", "ist": now.isoformat()}
+    if mins < 9 * 60 + 30:
+        return {"allowed": False, "reason": "no entry before 09:30 IST", "ist": now.isoformat()}
+    if mins >= 14 * 60 + 40:
+        return {"allowed": False, "reason": "no entry after 14:40 IST", "ist": now.isoformat()}
+    return {"allowed": True, "reason": "entry window ok", "ist": now.isoformat()}
+
+def _expiry_is_today(expiry) -> bool:
+    if not expiry:
+        return False
+    s = str(expiry).strip().upper()
+    today = _ist_now().date()
+    formats = ["%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d%b%Y", "%d-%b-%Y"]
+    for fmt in formats:
+        try:
+            return datetime.strptime(s, fmt).date() == today
+        except Exception:
+            pass
+    return today.strftime("%d%b%Y").upper() in s
+
+async def _refresh_wallet_for_session(session_id: str) -> float:
+    try:
+        w = await limits(SessionRequest(session_id=session_id))
+        for k in ("avlMrgn", "avlCash"):
+            if w.get(k) not in (None, ""):
+                return float(w.get(k))
+    except Exception as e:
+        logger.warning(f"wallet refresh failed: {e}")
+    return float(risk_engine.state().get("wallet") or 0)
+
+def _leg_sort_key(row: dict, side: str, atm: float) -> tuple:
+    strike = float(row.get("strike") or 0)
+    # For CE, prefer ATM then OTM above spot; for PE, prefer ATM then OTM below spot.
+    if side == "CE":
+        wrong_side_penalty = 100000 if strike < atm else 0
+    else:
+        wrong_side_penalty = 100000 if strike > atm else 0
+    return (wrong_side_penalty + abs(strike - atm), strike)
+
+async def _select_affordable_option(
+    session_id: str,
+    instrument: str,
+    side: str,
+    *,
+    n_strikes: int = 60,
+    max_deploy_pct: float = 95.0,
+    min_option_ltp: float = 0.05,
+    spot: float = 0.0,
+) -> dict:
+    """Wallet-aware option selector. It does NOT blindly pick ATM.
+
+    Selection rule:
+    1. Resolve a deep option chain.
+    2. Quote only the requested side.
+    3. Filter contracts where one lot premium debit fits inside wallet budget.
+    4. Pick the nearest-to-ATM affordable OTM/ATM contract, not the cheapest lottery contract.
+    """
+    instrument = instrument.upper()
+    side = side.upper()
+    if side not in ("CE", "PE"):
+        return {"success": False, "error": "side must be CE or PE"}
+    sess = get_session(session_id)
+    inst = INSTRUMENT_TOKENS.get(instrument)
+    if not inst:
+        return {"success": False, "error": f"Unknown instrument: {instrument}"}
+    wallet = await _refresh_wallet_for_session(session_id)
+    if wallet <= 0:
+        return {"success": False, "error": "wallet is zero; refresh wallet/login again", "wallet": wallet}
+    if spot <= 0:
+        async with httpx.AsyncClient(timeout=10) as c:
+            spot_ltp, err = await _ltp_via_script_details(c, sess, inst["neo_symbol"], inst["exchange_segment"])
+        if not spot_ltp or spot_ltp <= 0:
+            return {"success": False, "stage": "spot_fetch", "error": err or "spot is 0", "wallet": wallet}
+        spot = spot_ltp
+    try:
+        chain_meta = await scrip_master.find_atm_chain(sess, instrument, spot, n=max(4, min(90, n_strikes)))
+    except Exception as e:
+        return {"success": False, "stage": "scrip_master", "error": str(e), "spot": spot, "wallet": wallet}
+    expiry = chain_meta.get("expiry")
+    fo_seg = _fo_segment(instrument)
+    atm = float(chain_meta.get("atm") or 0)
+    side_key = side.lower()
+    budget = wallet * (_clamp(max_deploy_pct, 1, 100) / 100.0)
+    raw_rows = sorted(chain_meta.get("strikes") or [], key=lambda r: _leg_sort_key(r, side, atm))
+    candidates = []
+    async with httpx.AsyncClient(timeout=12) as c:
+        for row in raw_rows:
+            leg = row.get(side_key)
+            if not leg or not leg.get("p_symbol"):
+                continue
+            ltp, err = await _ltp_via_script_details(c, sess, leg["p_symbol"], fo_seg)
+            lot_size = int(leg.get("lot_size") or (20 if instrument == "SENSEX" else 75))
+            ltp = float(ltp or 0)
+            per_lot_cost = round(ltp * lot_size, 2) if ltp > 0 else 0.0
+            affordable = bool(ltp >= min_option_ltp and per_lot_cost > 0 and per_lot_cost <= budget)
+            candidates.append({
+                "strike": float(row.get("strike")),
+                "atm": float(row.get("strike")) == atm,
+                "side": side,
+                "p_symbol": leg.get("p_symbol"),
+                "p_trd_symbol": leg.get("p_trd_symbol"),
+                "lot_size": lot_size,
+                "ltp": ltp,
+                "per_lot_cost": per_lot_cost,
+                "affordable": affordable,
+                "distance_from_atm": abs(float(row.get("strike") or 0) - atm),
+                "error": err,
+            })
+            await asyncio.sleep(0.05)
+    affordable = [c for c in candidates if c["affordable"]]
+    if not affordable:
+        cheapest = min([c for c in candidates if c["per_lot_cost"] > 0], key=lambda x: x["per_lot_cost"], default=None)
+        return {
+            "success": False,
+            "error": "no affordable option found in scanned chain",
+            "instrument": instrument, "side": side, "wallet": wallet, "budget": round(budget, 2),
+            "spot": spot, "atm": atm, "expiry": expiry, "fo_segment": fo_seg,
+            "cheapest_seen": cheapest,
+            "candidates": candidates[:30],
+        }
+    # Production selector: choose the minimum premium that still looks tradable,
+    # then prefer the nearer strike. This matches small-wallet option buying.
+    # Extreme zero/liquidity-trap contracts are filtered by min_option_ltp.
+    affordable.sort(key=lambda c: (c["ltp"], c["distance_from_atm"]))
+    selected = affordable[0]
+    lots = int(budget // selected["per_lot_cost"]) if selected["per_lot_cost"] > 0 else 0
+    lots = max(1, lots)
+    selected["lots"] = lots
+    selected["qty"] = lots * selected["lot_size"]
+    selected["estimated_cost"] = round(selected["qty"] * selected["ltp"], 2)
+    return {
+        "success": True,
+        "instrument": instrument, "side": side, "wallet": wallet, "budget": round(budget, 2),
+        "spot": spot, "atm": atm, "expiry": expiry, "fo_segment": fo_seg,
+        "selected": selected,
+        "candidates": candidates[:30],
+        "selection_rule": "minimum affordable tradable premium within wallet budget",
+    }
+
+@app.post("/chain/affordable")
+async def chain_affordable(req: AffordableChainRequest):
+    return await _select_affordable_option(
+        req.session_id, req.instrument, req.side,
+        n_strikes=req.n_strikes, max_deploy_pct=req.max_deploy_pct,
+        min_option_ltp=req.min_option_ltp, spot=req.spot,
+    )
+
+class TradeExecuteRequest(BaseModel):
+    session_id: str
+    instrument: str = "NIFTY"
+    min_confidence: int = 60
+    force_side: str = "AUTO"          # AUTO / CE / PE
+    dry_run: bool = False             # production live by default; UI has explicit dry-run toggle
+    bypass_time_check: bool = False
+    allow_expiry_day: bool = False
+    max_deploy_pct: float = 95.0
+    n_strikes: int = 60
+    min_option_ltp: float = 0.05
+    order_type: str = "L"             # L recommended; MKT only if allow_market_order true
+    allow_market_order: bool = False
+    max_slippage_pct: float = 2.0      # buy limit = ltp * (1 + this%)
+    product: str = "NRML"
+
+async def _execute_trade_plan(req: TradeExecuteRequest) -> dict:
+    window = _entry_window_status(req.bypass_time_check)
+    if not window["allowed"]:
+        return {"success": False, "stage": "time_window", "error": window["reason"], "window": window}
+    sig = await advanced_signal(AdvancedSignalRequest(
+        session_id=req.session_id, instrument=req.instrument, min_confidence=req.min_confidence,
+    ))
+    if not sig.get("success"):
+        return {"success": False, "stage": "signal", "error": sig.get("error"), "signal": sig}
+    forced = req.force_side.upper().strip()
+    side = None
+    if forced in ("CE", "PE"):
+        side = forced
+    elif sig.get("action") == "BUY_CE":
+        side = "CE"
+    elif sig.get("action") == "BUY_PE":
+        side = "PE"
+    else:
+        return {"success": False, "stage": "signal", "error": f"signal action is {sig.get('action')} - not tradable", "signal": sig}
+    chain = await _select_affordable_option(
+        req.session_id, req.instrument, side, n_strikes=req.n_strikes,
+        max_deploy_pct=req.max_deploy_pct, min_option_ltp=req.min_option_ltp,
+    )
+    if not chain.get("success"):
+        return {"success": False, "stage": "affordable_chain", "error": chain.get("error"), "signal": sig, "chain": chain}
+    if _expiry_is_today(chain.get("expiry")) and not req.allow_expiry_day:
+        return {"success": False, "stage": "expiry_guard", "error": "expiry day blocked", "signal": sig, "chain": chain}
+    sel = chain["selected"]
+    required = float(sel.get("estimated_cost") or 0)
+    risk_ok, risk_reason = risk_engine.can_trade(required)
+    if not risk_ok:
+        return {"success": False, "stage": "risk", "error": risk_reason, "signal": sig, "chain": chain, "risk": risk_engine.state()}
+    if req.order_type.upper() == "MKT" and not req.allow_market_order:
+        return {"success": False, "stage": "order_guard", "error": "MKT blocked unless allow_market_order=true"}
+    buy_price = max(0.05, round(sel["ltp"] * (1 + max(0, req.max_slippage_pct) / 100.0), 2))
+    order_payload = {
+        "session_id": req.session_id,
+        "trading_symbol": sel["p_trd_symbol"],
+        "transaction_type": "B",
+        "quantity": str(sel["qty"]),
+        "order_type": req.order_type.upper(),
+        "price": f"{buy_price:.2f}" if req.order_type.upper() == "L" else "0",
+        "product": req.product,
+        "exchange_segment": chain["fo_segment"],
+    }
+    plan = {
+        "signal": sig, "chain": chain, "selected": sel, "order_payload": order_payload,
+        "guards": {"time_window": window, "risk": {"allowed": risk_ok, "reason": risk_reason}},
+        "dry_run": req.dry_run,
+    }
+    if req.dry_run:
+        return {"success": True, "stage": "dry_run", "message": "trade plan ready; no order placed", **plan}
+    res = await place_order(OrderRequest(**order_payload))
+    accepted = isinstance(res, dict) and res.get("stat") == "Ok"
+    return {"success": accepted, "stage": "live_order", "order_result": res, **plan}
+
+@app.post("/trade/execute")
+async def trade_execute(req: TradeExecuteRequest):
+    return await _execute_trade_plan(req)
+
 class TestPlaceRequest(BaseModel):
     session_id: str
     instrument: str = "NIFTY"
-    price:      float = 0.05
-    qty_lots:   int   = 1
+    price: float = 0.05
+    qty_lots: int = 1
+    side: str = "AUTO"
+    max_deploy_pct: float = 95.0
+    n_strikes: int = 60
 
 @app.post("/orders/test_place")
 async def test_place(req: TestPlaceRequest):
+    """Connectivity test: choose wallet-affordable strike, place a low-limit BUY,
+    then cancel immediately. This no longer blindly selects ATM CE.
+    """
+    side = req.side.upper().strip()
+    if side == "AUTO":
+        # For a test order we do not need a directional signal; use CE as broker-connectivity test.
+        side = "CE"
+    chain = await _select_affordable_option(
+        req.session_id, req.instrument, side, n_strikes=req.n_strikes,
+        max_deploy_pct=req.max_deploy_pct, min_option_ltp=0.05,
+    )
+    if not chain.get("success"):
+        return {"success": False, "stage": "affordable_chain", "error": chain.get("error"), "chain": chain}
     sess = get_session(req.session_id)
-    inst = INSTRUMENT_TOKENS.get(req.instrument.upper())
-    if not inst:
-        raise HTTPException(status_code=400, detail=f"Unknown instrument: {req.instrument}")
-    spot = 0.0
-    async with httpx.AsyncClient(timeout=15) as c:
-        ltp, err = await _ltp_via_script_details(c, sess, inst["neo_symbol"], inst["exchange_segment"])
-        if not ltp or ltp <= 0:
-            return {"success": False, "stage": "spot_fetch", "error": err or "spot is 0"}
-        spot = ltp
-    try:
-        chain_meta = await scrip_master.find_atm_chain(sess, req.instrument, spot, n=2)
-    except Exception as e:
-        return {"success": False, "stage": "scrip_master", "error": str(e), "spot": spot}
-    atm_row = next((s for s in chain_meta["strikes"] if s["strike"] == chain_meta["atm"] and s.get("ce")), None)
-    if not atm_row:
-        return {"success": False, "stage": "atm_lookup", "error": "no ATM CE in scrip master", "spot": spot}
-    ce = atm_row["ce"]
-    pTrdSymbol = ce["p_trd_symbol"]
-    pSymbol    = ce["p_symbol"]
-    fo_seg     = _fo_segment(req.instrument)
-    default_lot = 20 if req.instrument.upper() == "SENSEX" else 75
-    lot_size   = ce["lot_size"] or default_lot
-    qty        = req.qty_lots * lot_size
-    async with httpx.AsyncClient(timeout=10) as c:
-        opt_ltp, _ = await _ltp_via_script_details(c, sess, pSymbol, fo_seg)
-    safe_limit = req.price
-    if opt_ltp and opt_ltp > 0:
-        safe_limit = max(0.05, round(opt_ltp * 0.95, 2))
+    sel = chain["selected"]
+    # Test order limit deliberately below LTP to reduce fill probability, then cancel.
+    safe_limit = max(0.05, round(float(sel["ltp"]) * 0.80, 2))
+    if req.price and req.price > 0:
+        safe_limit = min(safe_limit, float(req.price))
+    qty = max(1, int(req.qty_lots)) * int(sel["lot_size"])
     place_url = f"{sess['base_url']}/quick/order/rule/ms/place"
     jData = {
-        "am": "NO", "dq": "0", "es": fo_seg, "mp": "0",
-        "pc": "NRML", "pf": "N",
-        "pr": f"{safe_limit:.2f}",
-        "pt": "L",
-        "qt": str(qty),
-        "rt": "DAY", "tp": "0",
-        "ts": pTrdSymbol,
-        "tt": "B",
+        "am": "NO", "dq": "0", "es": chain["fo_segment"], "mp": "0",
+        "pc": "NRML", "pf": "N", "pr": f"{safe_limit:.2f}", "pt": "L",
+        "qt": str(qty), "rt": "DAY", "tp": "0", "ts": sel["p_trd_symbol"], "tt": "B",
     }
-    place_diag: dict = {
-        "url":        place_url,
-        "trading_symbol": pTrdSymbol,
-        "p_symbol":   pSymbol,
-        "qty":        qty,
-        "option_ltp": opt_ltp,
-        "limit_price": safe_limit,
-        "atm_strike": chain_meta["atm"],
-        "spot":       spot,
-        "expiry":     chain_meta.get("expiry"),
-    }
-    body = f"jData={json.dumps(jData)}"
-    place_diag["body_size"] = len(body)
+    place_diag = {"url": place_url, "jData": jData, "selected": sel, "chain_summary": {k: chain.get(k) for k in ("wallet", "budget", "spot", "atm", "expiry")}}
     async with httpx.AsyncClient(timeout=20) as c:
         try:
-            r = await c.post(place_url,
-                headers={"accept": "application/json",
-                         "Auth": sess["session_token"], "Sid": sess["session_sid"],
-                         "neo-fin-key": NEO_FIN_KEY,
-                         "Content-Type": "application/x-www-form-urlencoded"},
-                data={"jData": json.dumps(jData)})
+            r = await c.post(place_url, headers={"accept": "application/json", "Auth": sess["session_token"], "Sid": sess["session_sid"], "neo-fin-key": NEO_FIN_KEY, "Content-Type": "application/x-www-form-urlencoded"}, data={"jData": json.dumps(jData)})
         except httpx.HTTPError as e:
-            place_diag["transport_error"] = f"{type(e).__name__}: {e}"
-            return {"success": False, "stage": "place_http", **place_diag}
-        place_diag["http_status"]    = r.status_code
-        place_diag["content_type"]   = r.headers.get("content-type", "")
-        place_diag["body_snippet"]   = (r.text or "")[:600]
-        body, parse_err = safe_json(r)
-        place_diag["parse_error"]    = parse_err
-        place_diag["body"]           = body
-    order_no = None
-    if isinstance(body, dict):
-        order_no = body.get("nOrdNo") or body.get("orderNo") or body.get("ordNo")
-    place_diag["order_no"] = order_no
-    cancel_diag: dict = {}
+            return {"success": False, "stage": "place_http", "error": f"{type(e).__name__}: {e}", "place": place_diag}
+    body, parse_err = safe_json(r)
+    place_diag.update({"http_status": r.status_code, "body_snippet": (r.text or "")[:600], "body": body, "parse_error": parse_err})
+    order_no = body.get("nOrdNo") if isinstance(body, dict) else None
+    cancel_diag = {}
     if order_no:
         async with httpx.AsyncClient(timeout=15) as c:
             try:
-                cr = await c.post(f"{sess['base_url']}/quick/order/cancel",
-                    headers={"accept": "application/json",
-                             "Auth": sess["session_token"], "Sid": sess["session_sid"],
-                             "neo-fin-key": NEO_FIN_KEY,
-                             "Content-Type": "application/x-www-form-urlencoded"},
-                    data={"jData": json.dumps({"am": "NO", "on": str(order_no)})})
+                cr = await c.post(f"{sess['base_url']}/quick/order/cancel", headers={"accept": "application/json", "Auth": sess["session_token"], "Sid": sess["session_sid"], "neo-fin-key": NEO_FIN_KEY, "Content-Type": "application/x-www-form-urlencoded"}, data={"jData": json.dumps({"am": "NO", "on": str(order_no)})})
                 cb, cerr = safe_json(cr)
-                cancel_diag = {
-                    "http_status": cr.status_code,
-                    "body":        cb,
-                    "parse_error": cerr,
-                }
+                cancel_diag = {"http_status": cr.status_code, "body": cb, "parse_error": cerr}
             except httpx.HTTPError as e:
                 cancel_diag = {"transport_error": f"{type(e).__name__}: {e}"}
-    accepted = bool(order_no)
-    rejected_reason = None
-    if not accepted and isinstance(body, dict):
-        rejected_reason = body.get("emsg") or body.get("message") or body.get("errMsg")
+    rejected_reason = body.get("emsg") or body.get("message") if isinstance(body, dict) else None
     return {
-        "success":          accepted,
-        "verdict":          "accepted (and cancelled)" if accepted else "rejected",
-        "rejected_reason":  rejected_reason,
-        "ip_whitelist_hint": (
-            "Look for 'IP', 'whitelist', 'access denied', '403', or 'Forbidden' in body_snippet/rejected_reason. "
-            "If absent and order was accepted, the IP is fine."
-        ),
-        "place":            place_diag,
-        "cancel":           cancel_diag,
+        "success": bool(order_no),
+        "verdict": "accepted (and cancelled)" if order_no else "rejected",
+        "rejected_reason": rejected_reason,
+        "place": place_diag,
+        "cancel": cancel_diag,
+        "note": "Test order uses affordable strike selection, not fixed ATM CE.",
     }
 
 class ResolveStrikeRequest(BaseModel):

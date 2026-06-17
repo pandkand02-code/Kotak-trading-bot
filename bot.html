@@ -660,9 +660,10 @@ async function testKotakOrder(){
   if(!confirm('Place a 1-lot BUY LIMIT @ safety limit price and immediately cancel? This tests connectivity.')) return;
   log('TEST ORDER: placing 1-lot @ safety limit price BUY LIMIT...','trade');
   try{
-    const res = await api('/orders/test_place',{session_id:G.sid,instrument:G.inst,price:0.05,qty_lots:1});
+    const res = await api('/orders/test_place',{session_id:G.sid,instrument:G.inst,price:0.05,qty_lots:1,side:'AUTO',max_deploy_pct:95,n_strikes:24});
     if(res.success){
-      log('ORDER ACCEPTED by Kotak. OrdNo: '+res.place.order_no+'. Connection OK.','success');
+      log('ORDER ACCEPTED by Kotak. OrdNo: '+(res.place?.body?.nOrdNo||res.place?.order_no||'-')+'. Connection OK.','success');
+      if(res.place?.selected){ log('Smart selected '+res.place.selected.p_trd_symbol+' strike '+res.place.selected.strike+' @ ₹'+res.place.selected.ltp+' cost/lot ₹'+res.place.selected.per_lot_cost,'trade'); }
       log('Cancel result: '+JSON.stringify(res.cancel).substring(0,200), 'info');
       G.orderAuthVerified = true;
       const tD=document.getElementById('tDot'), tL=document.getElementById('tLbl');
@@ -1603,9 +1604,37 @@ function _biasBucket(score){
   return 'NEUTRAL';
 }
 
+
+function paintAdvancedSignal(r){
+  if(!r || !r.success) return;
+  const dir = r.option_side || (r.action==='BUY_CE'?'CE':r.action==='BUY_PE'?'PE':'WAIT');
+  const conf = r.confidence || 0;
+  const de=document.getElementById('sigDir');
+  if(de){ de.textContent = dir; de.className = 'sig-big '+(dir==='CE'?'sig-ce':dir==='PE'?'sig-pe':'sig-idle'); }
+  const cf=document.getElementById('cFill');
+  if(cf){ cf.style.width = Math.min(100, conf)+'%'; cf.style.background = dir==='CE'?'var(--green)':dir==='PE'?'var(--red)':'var(--dim)'; }
+  const sr=document.getElementById('sigReason');
+  if(sr){ sr.textContent = `${r.action} · confidence ${conf}% · sentiment ${r.news?.sentiment_score ?? 0} · composite ${r.composite_score}`; }
+  const sb=document.getElementById('sigBadge');
+  if(sb){ sb.textContent = `${r.action} · ${conf}%`; sb.className='badge '+(dir==='CE'?'bg':dir==='PE'?'br':'bd'); }
+  G.sig = {direction: dir, confidence: conf, action: r.action, score: r.composite_score, _fromBackend: true, _ts: Date.now(), raw: r};
+  G.news = {sentiment_score:r.news?.sentiment_score||0, confidence:r.news?.confidence||0, headlines:r.news?.headlines||[]};
+  log(`ADVANCED SIGNAL → ${r.action} | Conf ${conf}% | Sentiment ${r.news?.sentiment_score ?? 0} (${r.news?.bias || 'NA'}) | Tech ${r.technical?.technical_score ?? 0}`,'trade');
+}
+
 async function analyze(){
+  if(G.sid){
+    const btn=document.getElementById('aBtn');
+    if(btn){btn.disabled=true; btn.textContent='⟳ ADVANCED ANALYSIS...';}
+    try{
+      const r = await api('/signals/advanced',{session_id:G.sid,instrument:G.inst,telegram_channel:G.tgChannel||'',include_telegram:!!G.tgChannel,min_confidence:75});
+      paintAdvancedSignal(r);
+      if(btn){btn.disabled=false; btn.textContent='⟳ ANALYZE NOW';}
+      return;
+    }catch(e){ log('Advanced signal error: '+e.message,'error'); if(btn){btn.disabled=false; btn.textContent='⟳ ANALYZE NOW';} }
+  }
   const key=document.getElementById('cKey').value.trim();
-  if(!key){log('Enter Claude API key.','warn');return;}
+  if(!key){log('Login to Kotak for backend advanced signal, or enter Claude API key.','warn');return;}
 
   const mkt = marketStatus();
   if(!mkt.open){
