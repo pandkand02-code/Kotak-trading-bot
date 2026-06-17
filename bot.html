@@ -336,11 +336,11 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
     </div>
 
     <div class="card">
-      <div class="ch"><span class="ct">AI Signal Engine</span><span class="badge bd" id="sigBadge">IDLE</span></div>
+      <div class="ch"><span class="ct">Backend Signal Engine</span><span class="badge bd" id="sigBadge">IDLE</span></div>
       <div class="cb" style="text-align:center;padding:20px 14px">
         <div class="sig-big sig-idle" id="sigDir">IDLE</div>
         <div class="cbar"><div class="cfill" id="cFill" style="width:0%;background:var(--dim)"></div></div>
-        <div style="font-size:11px;color:var(--text);margin-bottom:10px;font-style:italic" id="sigReason">Enter Claude API key and tap Analyze</div>
+        <div style="font-size:11px;color:var(--text);margin-bottom:10px;font-style:italic" id="sigReason">Backend technical signal. Tap Analyze</div>
         <div class="inds">
           <div class="ind"><span class="inl">RSI</span><span class="inv neut" id="i-RSI">—</span></div>
           <div class="ind"><span class="inl">MACD</span><span class="inv neut" id="i-MACD">—</span></div>
@@ -356,10 +356,8 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
     </div>
 
     <div class="card">
-      <div class="ch"><span class="ct">Claude API Key</span></div>
+      <div class="ch"><span class="ct">Signal Analysis</span></div>
       <div class="cb">
-        <input type="password" id="cKey" placeholder="sk-ant-api...">
-        <div style="font-size:10px;color:var(--dim);margin-bottom:8px">Free at console.anthropic.com</div>
         <button class="btn btn-b" id="aBtn" onclick="analyze()">⟳ ANALYZE NOW</button>
         <div style="font-size:10px;color:var(--dim);text-align:center" id="lastScan"></div>
       </div>
@@ -375,11 +373,8 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
           </select>
         </div>
         <div class="irow" style="margin-top:10px">
-          <span class="ilbl">Telegram News (public channel @name)</span>
-        </div>
-        <input id="tgChan" placeholder="e.g. stocknews_india" onchange="setTgChannel()" style="margin-top:4px">
-        <div style="font-size:10px;color:var(--dim);margin-top:-4px;margin-bottom:6px">
-          Paste a public channel username. The bot scrapes the last ~20 messages.
+          <span class="ilbl">News Engine</span>
+          <span style="font-size:11px;color:var(--gold)">RSS memory only</span>
         </div>
         <div class="irow" style="margin-top:10px">
           <span class="ilbl">Lots (<span id="lsLbl">75</span>/lot)</span>
@@ -1623,132 +1618,46 @@ function paintAdvancedSignal(r){
 }
 
 async function analyze(){
-  if(G.sid){
-    const btn=document.getElementById('aBtn');
-    if(btn){btn.disabled=true; btn.textContent='⟳ ADVANCED ANALYSIS...';}
-    try{
-      const r = await api('/signals/advanced',{session_id:G.sid,instrument:G.inst,telegram_channel:G.tgChannel||'',include_telegram:!!G.tgChannel,min_confidence:75});
-      paintAdvancedSignal(r);
-      if(btn){btn.disabled=false; btn.textContent='⟳ ANALYZE NOW';}
-      return;
-    }catch(e){ log('Advanced signal error: '+e.message,'error'); if(btn){btn.disabled=false; btn.textContent='⟳ ANALYZE NOW';} }
+  if(!G.sid){
+    log('Kotak session required. Login/restore session first.','warn');
+    return;
   }
-  const key=document.getElementById('cKey').value.trim();
-  if(!key){log('Login to Kotak for backend advanced signal, or enter Claude API key.','warn');return;}
 
   const mkt = marketStatus();
   if(!mkt.open){
-    document.getElementById('sigDir').textContent='CLOSED';
-    document.getElementById('sigDir').className='sig-big sig-idle';
-    document.getElementById('sigReason').textContent=mkt.reason;
+    const de=document.getElementById('sigDir');
+    if(de){ de.textContent='CLOSED'; de.className='sig-big sig-idle'; }
+    const sr=document.getElementById('sigReason');
+    if(sr) sr.textContent=mkt.reason;
     const sb=document.getElementById('sigBadge');
-    sb.textContent='MARKET CLOSED'; sb.className='badge bd';
+    if(sb){ sb.textContent='MARKET CLOSED'; sb.className='badge bd'; }
     return;
   }
 
   const btn=document.getElementById('aBtn');
-  btn.disabled=true; btn.textContent='⟳ ANALYZING...';
-  document.getElementById('sigDir').textContent='...';
-  document.getElementById('sigDir').className='sig-big sig-idle';
-  log('Sending data to Claude AI...','info');
-  const s=G.spot[G.inst];
-  const md_real = G.marketData[G.inst] || {};
-  const realOpen   = md_real.open    || 0;
-  const realHigh   = md_real.high    || 0;
-  const realLow    = md_real.low     || 0;
-  const realChg    = md_real.change  || 0;
-  const realMom5m  = md_real.momentum_5m || 0;
-  const realVix    = G.liveVix || md_real.vix || 0;
-  const ticksCount = md_real.ticks_count || 0;
-  const md={
-    instrument:G.inst,
-    spot: s.toFixed(2),
-    open: realOpen.toFixed(2),
-    high: realHigh.toFixed(2),
-    low:  realLow.toFixed(2),
-    intraday_change_pct: realChg.toFixed(3),
-    momentum_5m_pct:     realMom5m.toFixed(3),
-    vix:  realVix.toFixed(2),
-    ticks_observed: ticksCount,
-    time: new Date().toLocaleTimeString('en-IN',{hour12:false}),
-    data_source: md_real.source || 'SIMULATED'
-  };
-
-  if(ticksCount < 3){
-    quickLean(true);
-    log(`Warmup — ${ticksCount}/3 ticks; skipped Claude call.`,'warn');
-    btn.disabled=false; btn.textContent='⟳ ANALYZE NOW';
-    return;
-  }
-
+  if(btn){ btn.disabled=true; btn.textContent='⟳ ADVANCED ANALYSIS...'; }
   try{
-    const res=await fetch(CLAUDE,{method:'POST',headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:500,messages:[{role:'user',content:`Analyze option parameters.
-Instrument: ${md.instrument}
-Spot LTP: ${md.spot}
-Session Open / High / Low: ${md.open} / ${md.high} / ${md.low}
-Intraday change vs session open: ${md.intraday_change_pct}%
-Momentum (last 5 min): ${md.momentum_5m_pct}%
-India VIX: ${md.vix}
-Ticks observed this session: ${md.ticks_observed}
-Time: ${md.time}
-Data source: ${md.data_source}
-News sentiment: ${G.news?.sentiment_score ?? '0.0'}
-
-Return ONLY this exact JSON schema:
-{"direction":"CE","confidence":72,"rsi_signal":"BULLISH","macd_signal":"BULLISH","ema_signal":"BULLISH","vwap_signal":"BULLISH","stoch_signal":"BULLISH","bb_signal":"NEUTRAL","pcr_signal":"NEUTRAL","oi_signal":"BULLISH","reasoning":"intraday momentum positive","action":"BUY CE","strike_preference":"ATM","risk":"MEDIUM"}`}]})});
-    const data=await res.json();
-    const text=data.content?.[0]?.text||'{}';
-    let r;
-    try {
-      const clean = text.replace(/```json/g,'').replace(/```/g,'').trim();
-      r = JSON.parse(clean);
-    } catch(pe) {
-      const m = text.match(/\{[\s\S]*\}/);
-      if(m) r = JSON.parse(m[0]);
-      else throw new Error('Could not parse response.');
-    }
-    const dir  = (r.direction||'WAIT').toString().trim().toUpperCase();
-    const conf = parseInt(r.confidence)||50;
-    const reason = r.reasoning || 'Analysis complete';
-    const action = r.action || 'WAIT';
-    const strike = r.strike_preference || 'ATM';
-    const risk   = (r.risk||'MEDIUM').toString().toUpperCase();
-    G.sig = {...r, direction:dir, confidence:conf, _fromClaude:true, _ts:Date.now()};
-
-    const de=document.getElementById('sigDir');
-    de.textContent=dir==='CE'?'CE':dir==='PE'?'PE':'WAIT';
-    de.className='sig-big '+(dir==='CE'?'sig-ce':dir==='PE'?'sig-pe':'sig-idle');
-
-    const cf=document.getElementById('cFill');
-    cf.style.width=conf+'%';
-    cf.style.background=dir==='CE'?'var(--green)':dir==='PE'?'var(--red)':'var(--dim)';
-
-    document.getElementById('sigReason').textContent=reason;
-
-    const sb=document.getElementById('sigBadge');
-    sb.textContent=dir+' · '+conf+'%';
-    sb.className='badge '+(dir==='CE'?'bg':dir==='PE'?'br':'bd');
-
-    const map={RSI:'rsi_signal',MACD:'macd_signal',EMA:'ema_signal',VWAP:'vwap_signal',STOCH:'stoch_signal',BB:'bb_signal',PCR:'pcr_signal',OI:'oi_signal'};
-    Object.entries(map).forEach(([n,k])=>{
-      const v=(r[k]||'NEUTRAL').toString().trim().toUpperCase();
-      const el=document.getElementById('i-'+n);
-      if(el){el.textContent=v;el.className='inv '+(v==='BULLISH'?'bull':v==='BEARISH'?'bear':'neut');}
+    const r = await api('/signals/advanced',{
+      session_id:G.sid,
+      instrument:G.inst,
+      min_confidence:60
     });
-
-    const riskColor=risk==='HIGH'?'var(--red)':risk==='MEDIUM'?'var(--gold)':'var(--green)';
-    document.getElementById('sigTags').innerHTML=[
-      [action,'var(--accent)'],[strike,'var(--text)'],[risk+' RISK',riskColor]
-    ].map(([v,c])=>`<span class="badge" style="color:${c};border-color:${c}">${v}</span>`).join('');
-
-    document.getElementById('lastScan').textContent='Last: '+new Date().toLocaleTimeString('en-IN',{hour12:false});
-    log('Signal: '+dir+' ('+conf+'%) — '+reason,dir==='CE'?'success':'error');
-  }catch(e){log('AI error: '+e.message,'error');}
-  btn.disabled=false; btn.textContent='⟳ ANALYZE NOW';
+    paintAdvancedSignal(r);
+    const ls=document.getElementById('lastScan');
+    if(ls) ls.textContent='Last: '+new Date().toLocaleTimeString('en-IN',{hour12:false});
+  }catch(e){
+    log('Advanced signal error: '+e.message,'error');
+  }finally{
+    if(btn){ btn.disabled=false; btn.textContent='⟳ ANALYZE NOW'; }
+  }
 }
 
 async function startBot(){
-  if(!document.getElementById('cKey').value.trim()){log('Claude API key required.','warn');return;}
+  if(!G.sid){
+    log('Kotak session required. Please login or restore session first.','warn');
+    return;
+  }
+
   G.botOn=true;
   document.getElementById('startBtn').disabled=true;
   document.getElementById('stopBtn').disabled=false;
@@ -1758,160 +1667,103 @@ async function startBot(){
   document.getElementById('botBadge').className='badge bg';
   document.getElementById('fBot').textContent='● BOT ACTIVE';
   document.getElementById('fBot').style.color='var(--green)';
-  log('Bot started.','success');
+  log('Bot started with Kotak backend session.','success');
+
   await cycle();
+
   G.botIv=setInterval(async()=>{
     if(!G.botOn) return;
+
     const mkt=marketStatus();
     if(!mkt.open){
-      if(G.sid){await fetchWallet().catch(()=>{}); await fetchPos().catch(()=>{});}
+      await fetchWallet().catch(()=>{});
+      await fetchPos().catch(()=>{});
       return;
     }
+
     await cycle();
-    if(G.sid){
-      try{
-        const rs=await api('/risk/state',{},'GET');
-        if(rs?.halted){
-          log('🛑 Bot stopped — '+rs.halted_reason,'error');
-          stopBot(); return;
-        }
-      }catch(e){}
-    }
+
+    try{
+      const rs=await api('/risk/state',{},'GET');
+      if(rs?.halted){
+        log('🛑 Bot stopped — '+rs.halted_reason,'error');
+        stopBot();
+        return;
+      }
+    }catch(e){}
+
     await dispatchAutoTrade();
   },30000);
 }
 
 async function dispatchAutoTrade(){
-  if(!G.botOn || !G.sig) return;
-  const dir = G.sig.direction;
-  const conf = G.sig.confidence;
-  if(dir === 'WAIT'){ return; }
+  if(!G.botOn) return;
 
   const win = entryWindowAllowed();
-  if(!win.ok){ log('Auto-trade SKIP — '+win.reason,'warn'); return; }
-  if(G.sig.bias === 'NEUTRAL'){ log('Auto-trade SKIP — bias NEUTRAL','info'); return; }
-  if(conf < G.minConfidence){ log('Auto-trade SKIP — confidence low','info'); return; }
-  if(G.open.length >= G.maxConcurrent){ log('Auto-trade SKIP — max concurrent hit','info'); return; }
-
-  const sinceLast = Date.now() - G.lastEntryTs;
-  if(sinceLast < G.cooldownMs && G.open.length > 0){ log('Auto-trade SKIP — cooldown','info'); return; }
-
-  const avl = G.wallet ? parseFloat(G.wallet.avlMrgn || G.wallet.avlCash || 0) : 0;
-  const lotSize = LS[G.inst];
-  const step = G.inst==='SENSEX'?100:50;
-  const spot = G.spot[G.inst];
-  const atm = Math.round(spot/step)*step;
-
-  let selectedRow = null;
-  let finalLots = G.lots;
-
-  if (!G.sid || avl <= 0) {
-    selectedRow = G.chain.find(r => r.strike === atm);
-    if(!selectedRow){ log('Auto-trade SKIP — no chain row for ATM '+atm,'warn'); return; }
-  } else {
-    const pctLimit = 0.20;
-    const tradeBudget = avl * pctLimit;
-    
-    let candidateRows = [...G.chain];
-    if (dir === 'CE') {
-      candidateRows = candidateRows.filter(r => r.strike >= atm).sort((a, b) => a.strike - b.strike);
-    } else {
-      candidateRows = candidateRows.filter(r => r.strike <= atm).sort((a, b) => b.strike - a.strike);
-    }
-    
-    for (const row of candidateRows) {
-      const leg = dir === 'CE' ? row.ce : row.pe;
-      if (!leg || leg.ltp <= 0) continue;
-      
-      const oneLotCost = leg.ltp * lotSize;
-      if (oneLotCost <= avl) {
-        selectedRow = row;
-        let calculatedLots = Math.floor(tradeBudget / oneLotCost);
-        if (calculatedLots < 1) {
-          calculatedLots = 1;
-        }
-        finalLots = Math.min(10, calculatedLots);
-        break;
-      }
-    }
-
-    if (!selectedRow) {
-      log(`Auto-trade SKIP — No affordable ${dir} option strikes found in the chain within available wallet of ₹${avl.toFixed(2)}` ,'warn');
-      return;
-    }
+  if(!win.ok){
+    log('Auto-trade SKIP — '+win.reason,'warn');
+    return;
   }
 
-  const dup = G.open.find(t => t.symbol && t.symbol.indexOf(selectedRow.strike+dir) >= 0);
-  if(dup){ log('Auto-trade SKIP — already long '+dup.symbol,'info'); return; }
+  const sinceLast = Date.now() - G.lastEntryTs;
+  if(sinceLast < G.cooldownMs){
+    log('Auto-trade SKIP — cooldown','info');
+    return;
+  }
 
   try{
-    const r = await fetch('/rate_limit/status').then(x=>x.json()).catch(()=>null);
-    if(r && r.general_api && r.order_api){
-      const genUsed = r.general_api.used / Math.max(1, r.general_api.limit);
-      const ordUsed = r.order_api.used   / Math.max(1, r.order_api.limit);
-      if(genUsed > G.rlHeadroom || ordUsed > G.rlHeadroom){
+    const rl = await fetch('/rate_limit/status').then(x=>x.json()).catch(()=>null);
+    if(rl && rl.general_api){
+      const used = rl.general_api.used / Math.max(1, rl.general_api.limit);
+      if(used > G.rlHeadroom){
         log('Auto-trade SKIP — rate-limit headroom low','warn');
         return;
       }
     }
   }catch(e){}
 
-  G.lastEntryTs = Date.now();
-  log(`AUTO-TRADE → Buy ${dir} Strike ${selectedRow.strike} | Lots: ${finalLots} | (conf ${conf}%)` ,'trade');
-  placeOrder(dir, selectedRow, finalLots);
+  try{
+    const r = await api('/trade/execute',{
+      session_id:G.sid,
+      instrument:G.inst,
+      min_confidence:60,
+      dry_run:true
+    });
+
+    G.lastEntryTs = Date.now();
+
+    const msg = JSON.stringify(r);
+    if(r.success){
+      log('TRADE EXECUTE DRY-RUN → '+msg.substring(0,280),'trade');
+    }else{
+      log('Trade execute skipped/failed → '+msg.substring(0,280),'warn');
+    }
+  }catch(e){
+    log('Trade execute failed: '+e.message,'error');
+  }
 }
 
 async function fetchNews(){
-  let baseScore = 0, baseMatched = 0;
   try{
-    const r = await api('/news/sentiment', {instrument: G.inst});
+    const r = await api('/news/memory', {instrument: G.inst});
     G.news = r;
-    baseScore = r.sentiment_score || 0;
-    baseMatched = r.matched || 0;
-    log('News — sentiment '+r.sentiment_score+' across '+r.count+' headlines','info');
-  }catch(e){ log('News fetch error: '+e.message,'warn'); }
-  if(G.tgChannel){
+    const fresh = r.fresh_count ?? r.count ?? 0;
+    log('News memory — fresh '+fresh+' | score '+(r.sentiment_score ?? r.news_score ?? 0),'info');
+  }catch(e){
     try{
-      const tg = await api('/news/telegram', {channel: G.tgChannel});
-      if(tg.ok){
-        G.tgNews = tg;
-        log('Telegram @'+tg.channel+' — sentiment '+tg.sentiment_score+' across '+tg.count+' msgs','success');
-        const w1 = Math.max(1, baseMatched);
-        const w2 = Math.max(1, tg.matched || 0);
-        const merged = (baseScore * w1 + (tg.sentiment_score||0) * w2) / (w1 + w2);
-        if(G.news){
-          G.news = {
-            ...G.news,
-            sentiment_score: round(merged, 3),
-            telegram_score:  tg.sentiment_score,
-            telegram_count:  tg.count,
-            telegram_channel: tg.channel,
-            headlines: [...(G.news.headlines || []), ...(tg.headlines || []).map(h => '[TG] '+h)].slice(-12),
-          };
-        } else {
-          G.news = {sentiment_score: tg.sentiment_score, headlines: tg.headlines, count: tg.count, matched: tg.matched};
-        }
-      }
-    }catch(e){ log('Telegram fetch error: '+e.message,'warn'); }
+      const r = await api('/news/sentiment', {instrument: G.inst});
+      G.news = r;
+      log('News — sentiment '+(r.sentiment_score ?? 0)+' across '+(r.count ?? 0)+' headlines','info');
+    }catch(e2){
+      log('News fetch error: '+e2.message,'warn');
+    }
   }
 }
 
 function round(n, d){ const f = Math.pow(10, d); return Math.round(n*f)/f; }
 
 G.tgChannel = '';
-try { G.tgChannel = localStorage.getItem('nexus_tg_channel') || ''; } catch(_) {}
-function setTgChannel(){
-  const el = document.getElementById('tgChan');
-  if(!el) return;
-  const v = el.value.replace(/^@/, '').trim();
-  G.tgChannel = v;
-  try {
-    if(v) localStorage.setItem('nexus_tg_channel', v);
-    else  localStorage.removeItem('nexus_tg_channel');
-  } catch(_){}
-  log('Telegram channel: '+(v ? '@'+v : 'cleared'),'info');
-  if(v && G.sid) fetchNews();
-}
+function setTgChannel(){}
 
 async function cycle(){
   if(G.sid){await fetchWallet();await fetchPos();}
