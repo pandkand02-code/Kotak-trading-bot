@@ -769,7 +769,7 @@ _news_cache: dict[str, tuple[float, dict]] = {}
 _tg_cache: dict[str, tuple[float, dict]] = {}  # legacy endpoint kept but not used by execution
 TG_TTL = 180
 NEWS_TTL = 60
-NEWS_MAX_AGE_SECONDS = int(os.environ.get("NEWS_MAX_AGE_SECONDS", "300"))
+NEWS_MAX_AGE_SECONDS = int(os.environ.get("NEWS_MAX_AGE_SECONDS", "1800"))
 NEWS_DB_FILE = os.environ.get("NEWS_DB_FILE", "news_memory.db")
 
 # Free near-live sources. Reality check: free RSS may publish late; the bot rejects
@@ -777,7 +777,6 @@ NEWS_DB_FILE = os.environ.get("NEWS_DB_FILE", "news_memory.db")
 _FREE_NEWS_SOURCES = [
     ("google_nifty", "https://news.google.com/rss/search?q=NIFTY%20OR%20SENSEX%20OR%20RBI%20OR%20FII%20OR%20DII%20when:15m&hl=en-IN&gl=IN&ceid=IN:en"),
     ("google_market", "https://news.google.com/rss/search?q=Indian%20stock%20market%20NSE%20BSE%20when:15m&hl=en-IN&gl=IN&ceid=IN:en"),
-    ("moneycontrol", "https://www.moneycontrol.com/rss/MCtopnews.xml"),
     ("et_markets", "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms"),
     ("business_standard", "https://www.business-standard.com/rss/markets-106.rss"),
 ]
@@ -959,8 +958,8 @@ def _freshness_score(published_ts: int | None, now_ts: int, max_age: int) -> tup
         return 100, age, True
 
     # Reduced freshness from 5 to 15 minutes.
-    if age <= 900:
-        return 60, age, True
+    if age <= 1800:
+        return 35, age, True
 
     return 0, age, False
 
@@ -1074,7 +1073,7 @@ def _aggregate_scored_news(rows: list[dict], require_fresh: bool = True) -> dict
 @app.post("/news/sentiment")
 async def news_sentiment(req: NewsSentimentRequest):
     key = req.instrument.upper()
-    max_age = max(60, min(900, int(req.max_age_seconds or NEWS_MAX_AGE_SECONDS)))
+    max_age = max(60, min(1800, int(req.max_age_seconds or NEWS_MAX_AGE_SECONDS)))
     now = time.monotonic()
     hit = _news_cache.get(f"{key}:{max_age}")
     if hit and hit[0] > now and not req.force_refresh:
