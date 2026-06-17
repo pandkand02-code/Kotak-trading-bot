@@ -1792,10 +1792,10 @@ def _entry_window_status(bypass: bool = False) -> dict:
     mins = now.hour * 60 + now.minute
     if now.weekday() >= 5:
         return {"allowed": False, "reason": "weekend - market closed", "ist": now.isoformat()}
-    if mins < 9 * 60 + 30:
+    if mins < 9 * 60 + 30:      
         return {"allowed": False, "reason": "no entry before 09:30 IST", "ist": now.isoformat()}
-    if mins >= 14 * 60 + 40:
-        return {"allowed": False, "reason": "no entry after 14:40 IST", "ist": now.isoformat()}
+    if mins >= 15 * 60 + 15:
+        return {"allowed": False, "reason": "no entry after 15:40 IST", "ist": now.isoformat()}
     return {"allowed": True, "reason": "entry window ok", "ist": now.isoformat()}
 
 def _expiry_is_today(expiry) -> bool:
