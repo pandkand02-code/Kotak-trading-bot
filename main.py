@@ -168,6 +168,13 @@ scrip_master = ScripMaster()
 risk_engine = RiskEngine()
 tick_recorder = TickRecorder()
 
+# Runtime trade guards: in-memory safety state. PM2 restart clears it, but broker positions/orderbook remain source of truth.
+trade_runtime_state = {
+    "cooldown_until": {},
+    "last_stoploss_at": {},
+    "last_entry_order": {},
+}
+
 async def get_streamer(sid: str) -> KotakStreamer:
     sess = get_session(sid)
     s = streamers.get(sid)
@@ -214,6 +221,14 @@ class OrderRequest(BaseModel):
     validity: str = "DAY"; exchange_segment: str = "nse_fo"
     amo: str = "NO"; disclosed_quantity: str = "0"
     market_protection: str = "0"; pf: str = "N"; trigger_price: str = "0"
+    # Bracket order fields, as per Kotak place-order documentation.
+    # Used only when product="BO" or values are explicitly supplied.
+    square_off_type: str = ""       # sot: Absolute/Ticks
+    stop_loss_type: str = ""        # slt: Absolute/Ticks
+    stop_loss_value: str = ""       # slv
+    square_off_value: str = ""      # sov
+    trailing_sl: str = ""           # tlt: Y/N
+    trailing_sl_value: str = ""     # tsv
 
 class CancelRequest(BaseModel):
     session_id: str; order_no: str; am: str = "NO"
@@ -1649,6 +1664,16 @@ async def place_order(req: OrderRequest):
              "mp": req.market_protection, "pc": req.product, "pf": req.pf,
              "pr": req.price, "pt": req.order_type, "qt": req.quantity,
              "rt": req.validity, "tp": req.trigger_price, "ts": req.trading_symbol, "tt": req.transaction_type}
+    if req.product.upper() == "BO" or any([req.square_off_type, req.stop_loss_type, req.stop_loss_value,
+                                           req.square_off_value, req.trailing_sl, req.trailing_sl_value]):
+        jData.update({
+            "sot": req.square_off_type or "Absolute",
+            "slt": req.stop_loss_type or "Absolute",
+            "slv": req.stop_loss_value or "0",
+            "sov": req.square_off_value or "0",
+            "tlt": req.trailing_sl or "N",
+            "tsv": req.trailing_sl_value or "0",
+        })
     debug = []
     url = f"{sess['base_url']}/quick/order/rule/ms/place"
     debug.append({
@@ -1778,10 +1803,12 @@ class AffordableChainRequest(BaseModel):
     session_id: str
     instrument: str = "NIFTY"
     side: str = "CE"                 # CE / PE
-    n_strikes: int = 60              # deep scan to find affordable low-premium OTM contracts
+    n_strikes: int = 20              # enough when max_otm_points is capped
     max_deploy_pct: float = 95.0     # percent of available wallet allowed for premium debit
-    min_option_ltp: float = 0.05
+    min_option_ltp: float = 1.0      # avoid dead 5-paise/lottery contracts
     spot: float = 0.0
+    max_otm_points: float = 400.0    # production guard: avoid far OTM lottery strikes
+    max_lots: int = 1                # production guard: max one lot per signal by default
 
 def _ist_now():
     return datetime.now(ZoneInfo("Asia/Kolkata"))
@@ -1795,8 +1822,8 @@ def _entry_window_status(bypass: bool = False) -> dict:
         return {"allowed": False, "reason": "weekend - market closed", "ist": now.isoformat()}
     if mins < 9 * 60 + 30:
         return {"allowed": False, "reason": "no entry before 09:30 IST", "ist": now.isoformat()}
-    if mins >= 14 * 60 + 40:
-        return {"allowed": False, "reason": "no entry after 14:40 IST", "ist": now.isoformat()}
+    if mins >= 15 * 60 + 15:
+        return {"allowed": False, "reason": "no entry after 15:15 IST", "ist": now.isoformat()}
     return {"allowed": True, "reason": "entry window ok", "ist": now.isoformat()}
 
 def _expiry_is_today(expiry) -> bool:
@@ -1822,6 +1849,92 @@ async def _refresh_wallet_for_session(session_id: str) -> float:
         logger.warning(f"wallet refresh failed: {e}")
     return float(risk_engine.state().get("wallet") or 0)
 
+
+def _to_float_safe(v, default: float = 0.0) -> float:
+    try:
+        return float(str(v).replace(",", "").strip())
+    except Exception:
+        return default
+
+
+def _extract_rows(payload) -> list[dict]:
+    if isinstance(payload, dict):
+        data = payload.get("data") or payload.get("Data") or payload.get("positions") or []
+        if isinstance(data, dict):
+            return [data]
+        if isinstance(data, list):
+            return [x for x in data if isinstance(x, dict)]
+        return []
+    if isinstance(payload, list):
+        return [x for x in payload if isinstance(x, dict)]
+    return []
+
+
+def _position_symbol(pos: dict) -> str:
+    return str(pos.get("trdSym") or pos.get("trdSymbol") or pos.get("TradingSymbol") or pos.get("ts") or "")
+
+
+def _position_exchange(pos: dict) -> str:
+    return str(pos.get("exSeg") or pos.get("exchangeSegment") or pos.get("exchange") or "").lower()
+
+
+def _position_net_qty(pos: dict) -> float:
+    for k in ("qty", "netQty", "net_qty", "NetQty", "cfQty"):
+        if pos.get(k) not in (None, ""):
+            return _to_float_safe(pos.get(k), 0.0)
+    buy = _to_float_safe(pos.get("flBuyQty") or pos.get("buyQty") or 0)
+    sell = _to_float_safe(pos.get("flSellQty") or pos.get("sellQty") or 0)
+    return buy - sell
+
+
+def _is_index_option_symbol(sym: str, instrument: str | None = None) -> bool:
+    s = (sym or "").upper()
+    allowed = [instrument.upper()] if instrument else ["NIFTY", "SENSEX"]
+    return any(a in s for a in allowed) and ("CE" in s or "PE" in s)
+
+
+async def _active_option_positions(session_id: str, instrument: str | None = None) -> list[dict]:
+    try:
+        raw = await positions(SessionRequest(session_id=session_id))
+    except Exception as e:
+        logger.warning(f"active position check failed: {e}")
+        return []
+    out = []
+    for pos in _extract_rows(raw):
+        sym = _position_symbol(pos)
+        ex = _position_exchange(pos)
+        qty = _position_net_qty(pos)
+        if qty != 0 and ("fo" in ex or _is_index_option_symbol(sym, instrument)) and _is_index_option_symbol(sym, instrument):
+            cp = dict(pos)
+            cp["_parsed_symbol"] = sym
+            cp["_parsed_qty"] = qty
+            out.append(cp)
+    return out
+
+
+def _cooldown_key(session_id: str, instrument: str) -> str:
+    return f"{session_id}:{instrument.upper()}"
+
+
+def _cooldown_status(session_id: str, instrument: str) -> dict:
+    key = _cooldown_key(session_id, instrument)
+    until = float(trade_runtime_state["cooldown_until"].get(key) or 0)
+    now = time.time()
+    if until > now:
+        return {"allowed": False, "cooldown_until": int(until), "remaining_seconds": int(until - now)}
+    return {"allowed": True, "cooldown_until": int(until), "remaining_seconds": 0}
+
+
+def _set_cooldown(session_id: str, instrument: str, seconds: int, reason: str = "trade_cooldown") -> dict:
+    key = _cooldown_key(session_id, instrument)
+    until = time.time() + max(0, int(seconds))
+    trade_runtime_state["cooldown_until"][key] = until
+    return {"cooldown_until": int(until), "seconds": int(seconds), "reason": reason}
+
+
+def _round_price(v: float) -> float:
+    return round(max(0.05, float(v)), 2)
+
 def _leg_sort_key(row: dict, side: str, atm: float) -> tuple:
     strike = float(row.get("strike") or 0)
     # For CE, prefer ATM then OTM above spot; for PE, prefer ATM then OTM below spot.
@@ -1838,8 +1951,10 @@ async def _select_affordable_option(
     *,
     n_strikes: int = 60,
     max_deploy_pct: float = 95.0,
-    min_option_ltp: float = 0.05,
+    min_option_ltp: float = 1.0,
     spot: float = 0.0,
+    max_otm_points: float = 400.0,
+    max_lots: int = 1,
 ) -> dict:
     """Wallet-aware option selector. It does NOT blindly pick ATM.
 
@@ -1877,8 +1992,19 @@ async def _select_affordable_option(
     budget = wallet * (_clamp(max_deploy_pct, 1, 100) / 100.0)
     raw_rows = sorted(chain_meta.get("strikes") or [], key=lambda r: _leg_sort_key(r, side, atm))
     candidates = []
+    max_otm_points = float(max(0, max_otm_points or 0))
     async with httpx.AsyncClient(timeout=12) as c:
         for row in raw_rows:
+            strike = float(row.get("strike") or 0)
+            distance = abs(strike - atm)
+            # OTM distance cap: avoid far OTM lottery tickets.
+            # CE must be ATM/above ATM; PE must be ATM/below ATM.
+            if max_otm_points and distance > max_otm_points:
+                continue
+            if side == "CE" and strike < atm:
+                continue
+            if side == "PE" and strike > atm:
+                continue
             leg = row.get(side_key)
             if not leg or not leg.get("p_symbol"):
                 continue
@@ -1897,10 +2023,10 @@ async def _select_affordable_option(
                 "ltp": ltp,
                 "per_lot_cost": per_lot_cost,
                 "affordable": affordable,
-                "distance_from_atm": abs(float(row.get("strike") or 0) - atm),
+                "distance_from_atm": distance,
                 "error": err,
             })
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.15)  # Kotak public docs mention 10 req/sec; stay safely below it.
     affordable = [c for c in candidates if c["affordable"]]
     if not affordable:
         cheapest = min([c for c in candidates if c["per_lot_cost"] > 0], key=lambda x: x["per_lot_cost"], default=None)
@@ -1912,13 +2038,12 @@ async def _select_affordable_option(
             "cheapest_seen": cheapest,
             "candidates": candidates[:30],
         }
-    # Production selector: choose the minimum premium that still looks tradable,
-    # then prefer the nearer strike. This matches small-wallet option buying.
-    # Extreme zero/liquidity-trap contracts are filtered by min_option_ltp.
-    affordable.sort(key=lambda c: (c["ltp"], c["distance_from_atm"]))
+    # Production selector: choose the nearest affordable ATM/OTM strike inside the cap.
+    # Do NOT choose the cheapest far-OTM lottery contract.
+    affordable.sort(key=lambda c: (c["distance_from_atm"], c["ltp"]))
     selected = affordable[0]
     lots = int(budget // selected["per_lot_cost"]) if selected["per_lot_cost"] > 0 else 0
-    lots = max(1, lots)
+    lots = max(1, min(int(max_lots or 1), lots))
     selected["lots"] = lots
     selected["qty"] = lots * selected["lot_size"]
     selected["estimated_cost"] = round(selected["qty"] * selected["ltp"], 2)
@@ -1928,7 +2053,8 @@ async def _select_affordable_option(
         "spot": spot, "atm": atm, "expiry": expiry, "fo_segment": fo_seg,
         "selected": selected,
         "candidates": candidates[:30],
-        "selection_rule": "minimum affordable tradable premium within wallet budget",
+        "selection_rule": "nearest affordable ATM/OTM contract within max_otm_points and wallet budget",
+        "guards": {"max_otm_points": max_otm_points, "max_lots": max_lots, "min_option_ltp": min_option_ltp},
     }
 
 @app.post("/chain/affordable")
@@ -1937,6 +2063,7 @@ async def chain_affordable(req: AffordableChainRequest):
         req.session_id, req.instrument, req.side,
         n_strikes=req.n_strikes, max_deploy_pct=req.max_deploy_pct,
         min_option_ltp=req.min_option_ltp, spot=req.spot,
+        max_otm_points=req.max_otm_points, max_lots=req.max_lots,
     )
 
 class TradeExecuteRequest(BaseModel):
@@ -1948,17 +2075,44 @@ class TradeExecuteRequest(BaseModel):
     bypass_time_check: bool = False
     allow_expiry_day: bool = False
     max_deploy_pct: float = 95.0
-    n_strikes: int = 60
-    min_option_ltp: float = 0.05
+    n_strikes: int = 20
+    min_option_ltp: float = 1.0
+    max_otm_points: float = 400.0
+    max_lots: int = 1
     order_type: str = "L"             # L recommended; MKT only if allow_market_order true
     allow_market_order: bool = False
     max_slippage_pct: float = 2.0      # buy limit = ltp * (1 + this%)
     product: str = "NRML"
+    max_open_positions: int = 1
+    allow_existing_position: bool = False
+    cooldown_seconds: int = 300
+    use_bracket_order: bool = True     # safest SL/TP mode: broker-side BO/OCO if enabled by Kotak for the contract
+    stop_loss_pct: float = 2.0
+    target_pct: float = 3.0
+    trailing_sl: bool = False
+    trailing_sl_value: float = 0.0
 
 async def _execute_trade_plan(req: TradeExecuteRequest) -> dict:
     window = _entry_window_status(req.bypass_time_check)
     if not window["allowed"]:
         return {"success": False, "stage": "time_window", "error": window["reason"], "window": window}
+
+    cooldown = _cooldown_status(req.session_id, req.instrument)
+    if not cooldown["allowed"]:
+        return {"success": False, "stage": "cooldown", "error": "cooldown active", "cooldown": cooldown, "window": window}
+
+    active_positions = await _active_option_positions(req.session_id, req.instrument)
+    if active_positions and not req.allow_existing_position:
+        return {
+            "success": False,
+            "stage": "active_position_guard",
+            "error": "active option position exists; max one open position protection blocked new entry",
+            "active_positions": active_positions,
+            "window": window,
+        }
+    if len(active_positions) >= int(req.max_open_positions or 1) and not req.allow_existing_position:
+        return {"success": False, "stage": "max_open_position_guard", "error": "max open positions reached", "active_positions": active_positions}
+
     sig = await advanced_signal(AdvancedSignalRequest(
         session_id=req.session_id, instrument=req.instrument, min_confidence=req.min_confidence,
     ))
@@ -1977,12 +2131,17 @@ async def _execute_trade_plan(req: TradeExecuteRequest) -> dict:
     chain = await _select_affordable_option(
         req.session_id, req.instrument, side, n_strikes=req.n_strikes,
         max_deploy_pct=req.max_deploy_pct, min_option_ltp=req.min_option_ltp,
+        max_otm_points=req.max_otm_points, max_lots=req.max_lots,
     )
     if not chain.get("success"):
         return {"success": False, "stage": "affordable_chain", "error": chain.get("error"), "signal": sig, "chain": chain}
     if _expiry_is_today(chain.get("expiry")) and not req.allow_expiry_day:
         return {"success": False, "stage": "expiry_guard", "error": "expiry day blocked", "signal": sig, "chain": chain}
     sel = chain["selected"]
+    # Duplicate protection for the exact selected trading symbol.
+    duplicate_positions = [p for p in active_positions if _position_symbol(p).upper() == str(sel.get("p_trd_symbol") or "").upper()]
+    if duplicate_positions and not req.allow_existing_position:
+        return {"success": False, "stage": "duplicate_position_guard", "error": "same option position already exists", "selected": sel, "active_positions": duplicate_positions}
     required = float(sel.get("estimated_cost") or 0)
     risk_ok, risk_reason = risk_engine.can_trade(required)
     if not risk_ok:
@@ -1990,6 +2149,9 @@ async def _execute_trade_plan(req: TradeExecuteRequest) -> dict:
     if req.order_type.upper() == "MKT" and not req.allow_market_order:
         return {"success": False, "stage": "order_guard", "error": "MKT blocked unless allow_market_order=true"}
     buy_price = max(0.05, round(sel["ltp"] * (1 + max(0, req.max_slippage_pct) / 100.0), 2))
+    sl_abs = _round_price(buy_price * max(0.1, req.stop_loss_pct) / 100.0)
+    tp_abs = _round_price(buy_price * max(0.1, req.target_pct) / 100.0)
+    order_product = "BO" if req.use_bracket_order else req.product
     order_payload = {
         "session_id": req.session_id,
         "trading_symbol": sel["p_trd_symbol"],
@@ -1997,19 +2159,62 @@ async def _execute_trade_plan(req: TradeExecuteRequest) -> dict:
         "quantity": str(sel["qty"]),
         "order_type": req.order_type.upper(),
         "price": f"{buy_price:.2f}" if req.order_type.upper() == "L" else "0",
-        "product": req.product,
+        "product": order_product,
         "exchange_segment": chain["fo_segment"],
     }
+    exit_plan = {
+        "mode": "BO" if req.use_bracket_order else "manual_monitor_required",
+        "stop_loss_pct": req.stop_loss_pct,
+        "target_pct": req.target_pct,
+        "stop_loss_absolute_value": sl_abs,
+        "target_absolute_value": tp_abs,
+        "note": "BO fields are sent with entry order so broker handles OCO-style SL/target if BO is enabled for this contract.",
+    }
+    if req.use_bracket_order:
+        order_payload.update({
+            "square_off_type": "Absolute",
+            "stop_loss_type": "Absolute",
+            "stop_loss_value": f"{sl_abs:.2f}",
+            "square_off_value": f"{tp_abs:.2f}",
+            "trailing_sl": "Y" if req.trailing_sl else "N",
+            "trailing_sl_value": f"{_round_price(req.trailing_sl_value):.2f}" if req.trailing_sl else "0",
+        })
     plan = {
-        "signal": sig, "chain": chain, "selected": sel, "order_payload": order_payload,
-        "guards": {"time_window": window, "risk": {"allowed": risk_ok, "reason": risk_reason}},
+        "signal": sig, "chain": chain, "selected": sel, "order_payload": order_payload, "exit_plan": exit_plan,
+        "guards": {
+            "time_window": window,
+            "cooldown": cooldown,
+            "active_positions": active_positions,
+            "risk": {"allowed": risk_ok, "reason": risk_reason},
+            "max_otm_points": req.max_otm_points,
+            "max_lots": req.max_lots,
+        },
         "dry_run": req.dry_run,
     }
     if req.dry_run:
         return {"success": True, "stage": "dry_run", "message": "trade plan ready; no order placed", **plan}
     res = await place_order(OrderRequest(**order_payload))
     accepted = isinstance(res, dict) and res.get("stat") == "Ok"
-    return {"success": accepted, "stage": "live_order", "order_result": res, **plan}
+    if accepted:
+        trade_runtime_state["last_entry_order"][_cooldown_key(req.session_id, req.instrument)] = {
+            "order": res, "symbol": sel.get("p_trd_symbol"), "ts": int(time.time())
+        }
+        cd = _set_cooldown(req.session_id, req.instrument, req.cooldown_seconds, "post_entry_duplicate_fire_guard")
+    else:
+        cd = cooldown
+    return {"success": accepted, "stage": "live_order", "order_result": res, "cooldown_after_order": cd, **plan}
+
+@app.get("/trade/cooldown")
+async def trade_cooldown(session_id: str, instrument: str = "NIFTY"):
+    return _cooldown_status(session_id, instrument)
+
+@app.post("/trade/cooldown/clear")
+async def trade_cooldown_clear(req: SessionRequest):
+    prefix = f"{req.session_id}:"
+    for k in list(trade_runtime_state["cooldown_until"].keys()):
+        if k.startswith(prefix):
+            trade_runtime_state["cooldown_until"].pop(k, None)
+    return {"success": True, "state": trade_runtime_state["cooldown_until"]}
 
 @app.post("/trade/execute")
 async def trade_execute(req: TradeExecuteRequest):
