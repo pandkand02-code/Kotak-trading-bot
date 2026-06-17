@@ -919,12 +919,50 @@ def _news_relevance(headline: str, instrument: str) -> int:
 
 
 def _freshness_score(published_ts: int | None, now_ts: int, max_age: int) -> tuple[int, int | None, bool]:
+    """
+    News freshness policy for intraday trading confirmation.
+
+    Fixes handled here:
+    - RSS feeds sometimes omit pubDate; treat those rows as fetched-now but medium confidence.
+    - RSS feeds can produce small future timestamps because of timezone/provider skew.
+    - Cached/ancient feed items must be stored only as memory, not used for trading.
+
+    Freshness bands:
+    - 0 to 5 minutes: full freshness.
+    - 5 to 15 minutes: reduced freshness.
+    - Older than 15 minutes: ignored for live signal.
+    - Older than 24 hours: rejected as stale/cached.
+    """
     if not published_ts:
-        return 0, None, False
-    age = max(0, now_ts - int(published_ts))
-    if age > max_age:
+        return 60, 0, True
+
+    try:
+        published_ts = int(published_ts)
+    except (TypeError, ValueError):
+        return 60, 0, True
+
+    age = now_ts - published_ts
+
+    # Allow small future skew from RSS providers; reject unrealistic future dates.
+    if age < 0:
+        if abs(age) <= 7200:
+            age = 0
+        else:
+            return 0, age, False
+
+    # Reject old cached feed items.
+    if age > 86400:
         return 0, age, False
-    return int(max(0, min(100, 100 - (age / max_age) * 100))), age, True
+
+    # Full freshness for latest market news.
+    if age <= 300:
+        return 100, age, True
+
+    # Reduced freshness from 5 to 15 minutes.
+    if age <= 900:
+        return 60, age, True
+
+    return 0, age, False
 
 
 def _remember_news(items: list[dict], instrument: str, max_age: int) -> list[dict]:
@@ -1353,17 +1391,37 @@ async def advanced_signal(req: AdvancedSignalRequest):
     news = await _advanced_news_context(req.instrument)
     regime = _market_regime_score(md, technical)
 
-    composite = (
-        technical["technical_score"] * 0.60 +
-        news["sentiment_score"] * 0.20 +
-        regime["score"] * 0.10 +
-        (0.10 if technical.get("vix", 15) < 20 else -0.10) * 0.10
-    )
+    # Dynamic weighting:
+    # News is confirmation only. If there is no fresh/usable news, do not penalize
+    # an otherwise valid technical setup.
+    if int(news.get("usable_count") or 0) == 0:
+        composite = (
+            technical["technical_score"] * 0.80 +
+            regime["score"] * 0.10 +
+            (0.10 if technical.get("vix", 15) < 20 else -0.10) * 0.10
+        )
+        confidence = int(_clamp(
+            technical["confidence"] * 0.80 +
+            abs(regime["score"]) * 100 * 0.10 +
+            10,
+            0, 100
+        ))
+    else:
+        composite = (
+            technical["technical_score"] * 0.60 +
+            news["sentiment_score"] * 0.20 +
+            regime["score"] * 0.10 +
+            (0.10 if technical.get("vix", 15) < 20 else -0.10) * 0.10
+        )
+        confidence = int(_clamp(
+            technical["confidence"] * 0.60 +
+            news["confidence"] * 0.20 +
+            abs(regime["score"]) * 100 * 0.10 +
+            10,
+            0, 100
+        ))
+
     composite = round(_clamp(composite, -1.0, 1.0), 3)
-    confidence = int(_clamp(
-        technical["confidence"] * 0.60 + news["confidence"] * 0.20 + abs(regime["score"]) * 100 * 0.10 + 10,
-        0, 100
-    ))
     if confidence < req.min_confidence or abs(composite) < 0.22:
         action = "WAIT"
         option_side = None
@@ -1387,7 +1445,11 @@ async def advanced_signal(req: AdvancedSignalRequest):
         "confidence": confidence,
         "composite_score": composite,
         "min_confidence": req.min_confidence,
-        "weights": {"technical": 0.60, "news": 0.20, "market_regime": 0.10, "vix": 0.10},
+        "weights": (
+            {"technical": 0.80, "news": 0.00, "market_regime": 0.10, "vix": 0.10}
+            if int(news.get("usable_count") or 0) == 0
+            else {"technical": 0.60, "news": 0.20, "market_regime": 0.10, "vix": 0.10}
+        ),
         "technical": technical,
         "news": news,
         "market_regime": regime,
