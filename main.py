@@ -1424,35 +1424,22 @@ async def advanced_signal(req: AdvancedSignalRequest):
     news = await _advanced_news_context(req.instrument)
     regime = _market_regime_score(md, technical)
 
-    # Dynamic weighting:
-    # News is confirmation only. If there is no fresh/usable news, do not penalize
-    # an otherwise valid technical setup.
-    if int(news.get("usable_count") or 0) == 0:
-        composite = (
-            technical["technical_score"] * 0.80 +
-            regime["score"] * 0.10 +
-            (0.10 if technical.get("vix", 15) < 20 else -0.10) * 0.10
-        )
-        confidence = int(_clamp(
-            technical["confidence"] * 0.80 +
-            abs(regime["score"]) * 100 * 0.10 +
-            10,
-            0, 100
-        ))
-    else:
-        composite = (
-            technical["technical_score"] * 0.60 +
-            news["sentiment_score"] * 0.20 +
-            regime["score"] * 0.10 +
-            (0.10 if technical.get("vix", 15) < 20 else -0.10) * 0.10
-        )
-        confidence = int(_clamp(
-            technical["confidence"] * 0.60 +
-            news["confidence"] * 0.20 +
-            abs(regime["score"]) * 100 * 0.10 +
-            10,
-            0, 100
-        ))
+    # News weighting removed from the trading decision entirely (per user request —
+    # news sentiment was contributing little signal and, in practice, was still being
+    # blended in with weight 0.2 even on "0 headlines" reads, quietly dragging the
+    # composite score around). News is still fetched and returned in the response for
+    # visibility/debugging, but no longer affects composite_score, confidence, or action.
+    composite = (
+        technical["technical_score"] * 0.80 +
+        regime["score"] * 0.10 +
+        (0.10 if technical.get("vix", 15) < 20 else -0.10) * 0.10
+    )
+    confidence = int(_clamp(
+        technical["confidence"] * 0.80 +
+        abs(regime["score"]) * 100 * 0.10 +
+        10,
+        0, 100
+    ))
 
     composite = round(_clamp(composite, -1.0, 1.0), 3)
     if confidence < req.min_confidence or abs(composite) < 0.22:
@@ -1478,11 +1465,7 @@ async def advanced_signal(req: AdvancedSignalRequest):
         "confidence": confidence,
         "composite_score": composite,
         "min_confidence": req.min_confidence,
-        "weights": (
-            {"technical": 0.80, "news": 0.00, "market_regime": 0.10, "vix": 0.10}
-            if int(news.get("usable_count") or 0) == 0
-            else {"technical": 0.60, "news": 0.20, "market_regime": 0.10, "vix": 0.10}
-        ),
+        "weights": {"technical": 0.80, "news": 0.00, "market_regime": 0.10, "vix": 0.10},
         "technical": technical,
         "news": news,
         "market_regime": regime,
