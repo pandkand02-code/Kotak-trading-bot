@@ -403,6 +403,13 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
             ☐ LIVE auto-trade OFF (dry-run/simulation only)
           </button>
         </div>
+        <div class="sl-row" style="display:flex;align-items:center;gap:8px">
+          <button id="bypassWindowBtn" type="button" onclick="toggleBypassWindow()"
+                  style="flex:1;padding:8px 10px;border-radius:6px;border:1px dashed var(--red);
+                         background:transparent;color:var(--red);font-size:12px;text-align:left;cursor:pointer">
+            ☐ TEST MODE: bypass entry-window cutoff (temporary — turn off after testing)
+          </button>
+        </div>
         <div class="btn-2">
           <button class="btn btn-g" id="startBtn" onclick="startBot()">▶ START</button>
           <button class="btn btn-r" id="stopBtn" onclick="stopBot()" disabled>■ STOP</button>
@@ -549,6 +556,7 @@ const G = {
   botOn:false, botIv:null, open:[], done:[], pnl:0, logN:0, wallet:null,
   orderAuthVerified:false,
   liveAutoTrade:false,
+  debugBypassWindow:false,
   lastEntryTs:    0,
   maxConcurrent:  3,
   minConfidence:  70,
@@ -911,6 +919,14 @@ function _isExpiryDay(){
 }
 
 function entryWindowAllowed(){
+  // TEMPORARY TEST OVERRIDE: when G.debugBypassWindow is on, skip the time-of-day
+  // and expiry-day checks so you can confirm the order-placement pipeline itself
+  // works without waiting for a specific time window. The exchange still enforces
+  // its own real market hours independently (Kotak will reject orders if the
+  // market is genuinely closed), so this only bypasses our own extra safety
+  // margin, not actual trading-hours protection. Turn this back OFF once you've
+  // confirmed orders place correctly — see the TEST MODE button next to LIVE auto-trade.
+  if(G.debugBypassWindow) return {ok:true, bypassed:true};
   const mkt = marketStatus();
   if(!mkt.open) return {ok:false, reason: mkt.reason};
   const mins = _istMins();
@@ -1670,6 +1686,22 @@ async function analyze(){
   }
 }
 
+function toggleBypassWindow(){
+  G.debugBypassWindow = !G.debugBypassWindow;
+  const btn = document.getElementById('bypassWindowBtn');
+  if(G.debugBypassWindow){
+    btn.textContent = '☑ TEST MODE ON — entry-window cutoff bypassed';
+    btn.style.background = 'var(--red)';
+    btn.style.color = '#fff';
+    log('⚠ TEST MODE: entry-window cutoff bypassed. Remember to turn this back off.','warn');
+  }else{
+    btn.textContent = '☐ TEST MODE: bypass entry-window cutoff (temporary — turn off after testing)';
+    btn.style.background = 'transparent';
+    btn.style.color = 'var(--red)';
+    log('TEST MODE off — entry-window cutoff restored.','info');
+  }
+}
+
 function _renderLiveAutoTradeBtn(){
   const btn = document.getElementById('liveAutoTradeBtn');
   if(!btn) return;
@@ -1782,7 +1814,8 @@ async function dispatchAutoTrade(){
       session_id:G.sid,
       instrument:G.inst,
       min_confidence:60,
-      dry_run:!liveMode
+      dry_run:!liveMode,
+      bypass_time_check:G.debugBypassWindow
     });
 
     // Only re-arm the cooldown when a trade actually executed (live or a
@@ -1796,8 +1829,48 @@ async function dispatchAutoTrade(){
     }
 
     const msg = JSON.stringify(r);
-    if(r.success && liveMode){
+    if(r.success && liveMode && r.stage === 'live_order'){
       log('✓ LIVE TRADE EXECUTED → '+msg.substring(0,280),'success');
+      // Previously a successful live order was only logged — never added to G.open
+      // or handed to startMon() for TP/SL monitoring. That meant a real fill would
+      // be invisible in the UI (TRADES/OPEN counters, Orders tab) and never
+      // auto-exit on stop-loss/take-profit. Register it the same way the manual
+      // BUY CE/PE flow does.
+      try{
+        const sel = r.selected || {};
+        const entryPrice = Number(sel.ltp) || 0;
+        const tpPctEl = document.getElementById('tpS');
+        const slPctEl = document.getElementById('slS');
+        const tpPct = tpPctEl ? parseFloat(tpPctEl.value) : 30;
+        const slPct = slPctEl ? parseFloat(slPctEl.value) : 30;
+        const tp = +(entryPrice * (1 + tpPct / 100)).toFixed(2);
+        const sl = +(entryPrice * (1 - slPct / 100)).toFixed(2);
+        const trade = {
+          id: 'T' + Date.now(),
+          symbol: sel.p_trd_symbol || 'UNKNOWN',
+          side: (r.signal && r.signal.option_side) || 'CE',
+          qty: sel.qty || 0,
+          lots: sel.lots || 0,
+          entryPrice, currentLTP: entryPrice, tp, sl,
+          pnl: 0, pnlPct: 0,
+          entry: new Date().toLocaleTimeString('en-IN',{hour12:false}),
+          status: 'OPEN',
+          pSymbol: sel.p_symbol || null,
+          exchSeg: (r.chain && r.chain.fo_segment) || 'nse_fo',
+          entryOrdNo: (r.order_result && r.order_result.nOrdNo) || null,
+          isPaper: false,
+          initialSL: sl, initialTP: tp,
+          maxLTP: entryPrice, trailStage: 0,
+          autoTrade: true,
+        };
+        G.open.push(trade);
+        startMon(trade);
+        render();
+        log('Position registered for monitoring: '+trade.symbol+' TP:'+tp+' SL:'+sl,'info');
+      }catch(regErr){
+        log('⚠ Live order placed but failed to register for monitoring: '+regErr.message+
+            ' — CHECK KOTAK DIRECTLY, this position has no automatic SL/TP.','error');
+      }
     }else if(r.success){
       log('TRADE EXECUTE DRY-RUN → '+msg.substring(0,280),'trade');
     }else{
