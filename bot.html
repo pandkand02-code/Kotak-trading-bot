@@ -1769,7 +1769,15 @@ async function dispatchAutoTrade(){
       dry_run:!liveMode
     });
 
-    G.lastEntryTs = Date.now();
+    // Only re-arm the cooldown when a trade actually executed (live or a
+    // successful dry-run "would have traded"). Previously this ran unconditionally,
+    // which meant a WAIT/skip result also reset the 5-minute cooldown — starving
+    // the bot down to effectively one signal check per 5 minutes instead of every
+    // cycle, and silently re-locking even when nothing was traded.
+    const tradeHappened = !!(r && r.success && r.stage && r.stage !== 'signal' && r.stage !== 'affordable_chain');
+    if(tradeHappened){
+      G.lastEntryTs = Date.now();
+    }
 
     const msg = JSON.stringify(r);
     if(r.success && liveMode){
