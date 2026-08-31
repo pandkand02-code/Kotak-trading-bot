@@ -231,6 +231,18 @@ def get_session(sid):
         raise HTTPException(status_code=401, detail="Session expired. Login again.")
     return sessions[sid]
 
+class ClientLogRequest(BaseModel):
+    level: str = "info"
+    message: str
+
+@app.post("/client_log")
+async def client_log(req: ClientLogRequest):
+    """Lets the browser mirror its own log entries into the server log (pm2 logs),
+    so client-side skip/block reasons (entry window, cooldown, expiry guard, etc.)
+    that never trigger an HTTP call to any other endpoint are still visible here."""
+    logger.info(f"[UI] {req.level.upper()}: {req.message}")
+    return {"ok": True}
+
 BOT_HTML = open("bot.html").read() if os.path.exists("bot.html") else "<h1>bot.html missing</h1>"
 
 @app.get("/", response_class=HTMLResponse)
