@@ -396,6 +396,12 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
           <div class="sl-hdr"><span style="color:var(--dim)">MAX DAILY LOSS</span><span style="color:var(--gold)" id="mlLbl">3%</span></div>
           <input type="range" id="mlS" min="1" max="10" step="1" value="3" oninput="document.getElementById('mlLbl').textContent=this.value+'%'">
         </div>
+        <div class="sl-row" style="display:flex;align-items:center;gap:8px">
+          <input type="checkbox" id="liveAutoTradeChk" onchange="toggleLiveAutoTrade(this.checked)" style="width:16px;height:16px">
+          <label for="liveAutoTradeChk" style="color:var(--gold);font-size:13px;cursor:pointer">
+            LIVE auto-trade (places real orders). Unchecked = dry-run/simulation only.
+          </label>
+        </div>
         <div class="btn-2">
           <button class="btn btn-g" id="startBtn" onclick="startBot()">▶ START</button>
           <button class="btn btn-r" id="stopBtn" onclick="stopBot()" disabled>■ STOP</button>
@@ -541,6 +547,7 @@ const G = {
   inst:"NIFTY", lots:1, chain:[], selRow:null, sig:null,
   botOn:false, botIv:null, open:[], done:[], pnl:0, logN:0, wallet:null,
   orderAuthVerified:false,
+  liveAutoTrade:false,
   lastEntryTs:    0,
   maxConcurrent:  3,
   minConfidence:  70,
@@ -807,6 +814,8 @@ function doLogout(){
   G.sid=null;
   try{ localStorage.removeItem('nexus_session'); }catch(_){}
   G.orderAuthVerified=false;
+  G.liveAutoTrade=false;
+  const liveChk=document.getElementById('liveAutoTradeChk'); if(liveChk) liveChk.checked=false;
   document.getElementById('tDot').className='dot off';
   document.getElementById('tLbl').textContent='TRADE✗';
   document.getElementById('aDone').style.display='none';
@@ -1652,6 +1661,27 @@ async function analyze(){
   }
 }
 
+function toggleLiveAutoTrade(checked){
+  if(checked){
+    if(!G.orderAuthVerified){
+      log('🛑 Cannot enable LIVE auto-trade — run TEST ORDER (LOG tab) once first to verify order auth.','error');
+      document.getElementById('liveAutoTradeChk').checked = false;
+      G.liveAutoTrade = false;
+      return;
+    }
+    if(!confirm('This will let the bot place REAL orders on Kotak automatically, with no per-trade confirmation. Continue?')){
+      document.getElementById('liveAutoTradeChk').checked = false;
+      G.liveAutoTrade = false;
+      return;
+    }
+    G.liveAutoTrade = true;
+    log('⚠ LIVE auto-trade ENABLED — bot will place real orders.','warn');
+  } else {
+    G.liveAutoTrade = false;
+    log('LIVE auto-trade disabled — back to dry-run/simulation.','info');
+  }
+}
+
 async function startBot(){
   if(!G.sid){
     log('Kotak session required. Please login or restore session first.','warn');
@@ -1723,17 +1753,20 @@ async function dispatchAutoTrade(){
   }catch(e){}
 
   try{
+    const liveMode = !!(G.liveAutoTrade && G.orderAuthVerified);
     const r = await api('/trade/execute',{
       session_id:G.sid,
       instrument:G.inst,
       min_confidence:60,
-      dry_run:true
+      dry_run:!liveMode
     });
 
     G.lastEntryTs = Date.now();
 
     const msg = JSON.stringify(r);
-    if(r.success){
+    if(r.success && liveMode){
+      log('✓ LIVE TRADE EXECUTED → '+msg.substring(0,280),'success');
+    }else if(r.success){
       log('TRADE EXECUTE DRY-RUN → '+msg.substring(0,280),'trade');
     }else{
       log('Trade execute skipped/failed → '+msg.substring(0,280),'warn');
