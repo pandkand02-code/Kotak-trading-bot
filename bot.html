@@ -1394,7 +1394,7 @@ async function placeOrder(side,rowOvr,lotsOverride){
     log('🛑 LIVE TRADE BLOCKED — quote stream stale, refusing to act on old prices.','error');
   } else if(G.sid){
     try{
-      const res=await api('/orders/place',{session_id:G.sid,trading_symbol:realSymbol,transaction_type:'B',quantity:String(qty),order_type:'MKT',exchange_segment:exchSeg,product:'NRML'});
+      const res=await api('/orders/place',{session_id:G.sid,trading_symbol:realSymbol,transaction_type:'B',quantity:String(qty),order_type:'MKT',exchange_segment:exchSeg,product:'NRML',lot_size:LS[G.inst]});
       log('STEP 4/5 Kotak responded — stat='+(res.stat||'?')+' stCode='+(res.stCode||'-')+' ordNo='+(res.nOrdNo||'-'),'info');
       if(res.stat==='Ok'){
         liveOrdNo = res.nOrdNo;
