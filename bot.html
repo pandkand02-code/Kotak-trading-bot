@@ -397,10 +397,11 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
           <input type="range" id="mlS" min="1" max="10" step="1" value="3" oninput="document.getElementById('mlLbl').textContent=this.value+'%'">
         </div>
         <div class="sl-row" style="display:flex;align-items:center;gap:8px">
-          <input type="checkbox" id="liveAutoTradeChk" onchange="toggleLiveAutoTrade(this.checked)" style="width:16px;height:16px">
-          <label for="liveAutoTradeChk" style="color:var(--gold);font-size:13px;cursor:pointer">
-            LIVE auto-trade (places real orders). Unchecked = dry-run/simulation only.
-          </label>
+          <button id="liveAutoTradeBtn" type="button" onclick="toggleLiveAutoTrade()"
+                  style="flex:1;padding:8px 10px;border-radius:6px;border:1px solid var(--gold);
+                         background:transparent;color:var(--gold);font-size:13px;text-align:left;cursor:pointer">
+            ☐ LIVE auto-trade OFF (dry-run/simulation only)
+          </button>
         </div>
         <div class="btn-2">
           <button class="btn btn-g" id="startBtn" onclick="startBot()">▶ START</button>
@@ -823,7 +824,7 @@ function doLogout(){
   try{ localStorage.removeItem('nexus_session'); }catch(_){}
   G.orderAuthVerified=false;
   G.liveAutoTrade=false;
-  const liveChk=document.getElementById('liveAutoTradeChk'); if(liveChk) liveChk.checked=false;
+  _renderLiveAutoTradeBtn();
   document.getElementById('tDot').className='dot off';
   document.getElementById('tLbl').textContent='TRADE✗';
   document.getElementById('aDone').style.display='none';
@@ -1669,17 +1670,31 @@ async function analyze(){
   }
 }
 
-function toggleLiveAutoTrade(checked){
-  if(checked){
+function _renderLiveAutoTradeBtn(){
+  const btn = document.getElementById('liveAutoTradeBtn');
+  if(!btn) return;
+  if(G.liveAutoTrade){
+    btn.textContent = '☑ LIVE auto-trade ON — placing real orders';
+    btn.style.background = 'var(--gold)';
+    btn.style.color = '#000';
+  } else {
+    btn.textContent = '☐ LIVE auto-trade OFF (dry-run/simulation only)';
+    btn.style.background = 'transparent';
+    btn.style.color = 'var(--gold)';
+  }
+}
+
+function toggleLiveAutoTrade(){
+  // Single button, single click handler — no separate checkbox+label pair that
+  // could each independently fire a toggle (which was flipping this back off
+  // seconds after being enabled, most likely from a stray click landing on the
+  // label right as the confirm() dialog closed).
+  if(!G.liveAutoTrade){
     if(!G.orderAuthVerified){
       log('🛑 Cannot enable LIVE auto-trade — run TEST ORDER (LOG tab) once first to verify order auth.','error');
-      document.getElementById('liveAutoTradeChk').checked = false;
-      G.liveAutoTrade = false;
       return;
     }
     if(!confirm('This will let the bot place REAL orders on Kotak automatically, with no per-trade confirmation. Continue?')){
-      document.getElementById('liveAutoTradeChk').checked = false;
-      G.liveAutoTrade = false;
       return;
     }
     G.liveAutoTrade = true;
@@ -1688,6 +1703,7 @@ function toggleLiveAutoTrade(checked){
     G.liveAutoTrade = false;
     log('LIVE auto-trade disabled — back to dry-run/simulation.','info');
   }
+  _renderLiveAutoTradeBtn();
 }
 
 async function startBot(){
