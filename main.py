@@ -122,6 +122,11 @@ KOTAK_VALIDATE_URL = "https://mis.kotaksecurities.com/login/1.0/tradeApiValidate
 NEO_FIN_KEY        = "neotradeapi"
 sessions: dict     = {}
 
+# NSE/BSE-published per-order "freeze quantity" caps (conservative fallback values —
+# exchanges revise these periodically; /orders/place also auto-retries using the
+# exchange's own live-reported limit if a specific scrip's real cap differs from this).
+FREEZE_QTY_FALLBACK = {"NIFTY": 1800, "SENSEX": 1000, "BANKNIFTY": 900}
+
 SESSIONS_FILE = os.environ.get("SESSIONS_FILE", "sessions.json")
 SESSION_TTL_HOURS = int(os.environ.get("SESSION_TTL_HOURS", "20"))
 
@@ -214,6 +219,9 @@ class OrderRequest(BaseModel):
     validity: str = "DAY"; exchange_segment: str = "nse_fo"
     amo: str = "NO"; disclosed_quantity: str = "0"
     market_protection: str = "0"; pf: str = "N"; trigger_price: str = "0"
+    lot_size: int = 0  # optional; when known, enables auto-retry with a reduced,
+                       # exchange-legal quantity if Kotak rejects for exceeding
+                       # the per-order "freeze quantity" limit for this scrip.
 
 class CancelRequest(BaseModel):
     session_id: str; order_no: str; am: str = "NO"
@@ -1670,6 +1678,48 @@ async def place_order(req: OrderRequest):
             detail=f"Order rate limit exceeded. Status: {rl.status()['order_api']}"
         )
     sess = get_session(req.session_id)
+    result, debug = await _place_order_raw(sess, req)
+    if isinstance(result, dict) and result.get("stat") != "Ok":
+        # Kotak rejects orders that exceed the exchange's per-order "freeze quantity"
+        # for that scrip, e.g. "The maximum allowed quantity in this scrip is 1801
+        # per order." If we know the lot size, auto-retry once with quantity reduced
+        # to fit — floored to a whole number of lots — instead of failing outright.
+        emsg = str(result.get("emsg") or "")
+        m = re.search(r"maximum allowed quantity in this scrip is\s*(\d+)", emsg, re.IGNORECASE)
+        if m and req.lot_size > 0:
+            max_qty = int(m.group(1))
+            try:
+                current_qty = int(req.quantity)
+            except ValueError:
+                current_qty = None
+            if current_qty and current_qty > max_qty:
+                reduced_lots = max(1, max_qty // req.lot_size)
+                reduced_qty = reduced_lots * req.lot_size
+                if reduced_qty < current_qty:
+                    logger.warning(
+                        f"order/place freeze-qty rejection: requested={current_qty} "
+                        f"exchange_max={max_qty} lot_size={req.lot_size} -> retrying with {reduced_qty}"
+                    )
+                    retry_req = req.model_copy(update={"quantity": str(reduced_qty)})
+                    retry_result, retry_debug = await _place_order_raw(sess, retry_req)
+                    debug.append({"step": "freeze_qty_auto_retry", "original_qty": current_qty,
+                                  "exchange_max_qty": max_qty, "retried_qty": reduced_qty})
+                    debug.extend(retry_debug)
+                    if isinstance(retry_result, dict):
+                        retry_result["auto_reduced_from_qty"] = current_qty
+                        retry_result["debug"] = debug
+                        if retry_result.get("stat") == "Ok":
+                            logger.info(f"Order placed after freeze-qty auto-reduce: {retry_result}")
+                        return retry_result
+    if isinstance(result, dict):
+        return {**result, "debug": debug}
+    return {"success": False, "stat": "Not_Ok", "raw": result, "debug": debug}
+
+
+async def _place_order_raw(sess: dict, req: OrderRequest):
+    """Fires a single order/place HTTP call and returns (result_dict, debug_list).
+    Factored out so /orders/place can transparently retry once with a reduced
+    quantity if Kotak rejects for exceeding the exchange's freeze-quantity cap."""
     jData = {"am": req.amo, "dq": req.disclosed_quantity, "es": req.exchange_segment,
              "mp": req.market_protection, "pc": req.product, "pf": req.pf,
              "pr": req.price, "pt": req.order_type, "qt": req.quantity,
@@ -1703,7 +1753,7 @@ async def place_order(req: OrderRequest):
         except httpx.HTTPError as e:
             debug.append({"step": "transport_error", "kind": type(e).__name__, "msg": str(e)})
             logger.warning(f"order/place transport_error: {type(e).__name__}: {e}")
-            return {"success": False, "stat": "Not_Ok", "error": f"{type(e).__name__}: {e}", "debug": debug}
+            return {"success": False, "stat": "Not_Ok", "error": f"{type(e).__name__}: {e}"}, debug
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         debug.append({
             "step":         "http_response",
@@ -1724,17 +1774,17 @@ async def place_order(req: OrderRequest):
         })
         if err:
             logger.warning(f"order/place parse_error http={r.status_code} err={err}")
-            return {"success": False, "stat": "Not_Ok", "error": err, "debug": debug}
+            return {"success": False, "stat": "Not_Ok", "error": err}, debug
         if isinstance(result, dict) and result.get("stat") == "Ok":
             logger.info(f"Order placed: {result}")
-            return {**result, "debug": debug}
+            return result, debug
         logger.warning(
             f"order/place NOT OK http={r.status_code} stCode={result.get('stCode') if isinstance(result, dict) else '?'} "
             f"emsg={result.get('emsg') if isinstance(result, dict) else '?'}"
         )
         if isinstance(result, dict):
-            return {**result, "debug": debug}
-        return {"success": False, "stat": "Not_Ok", "raw": result, "debug": debug}
+            return result, debug
+        return {"success": False, "stat": "Not_Ok", "raw": result}, debug
 
 @app.post("/orders/cancel")
 async def cancel_order(req: CancelRequest):
@@ -1944,6 +1994,17 @@ async def _select_affordable_option(
     selected = affordable[0]
     lots = int(budget // selected["per_lot_cost"]) if selected["per_lot_cost"] > 0 else 0
     lots = max(1, lots)
+    # Safety cap: exchanges enforce a per-order "freeze quantity" (Kotak rejects
+    # anything above it, e.g. "maximum allowed quantity in this scrip is 1801 per
+    # order"). Very cheap premiums (paise-level) can otherwise make budget-maximizing
+    # math pick an absurd lot count. This conservative fallback avoids ever attempting
+    # such an order; /orders/place also auto-retries with the exchange's own reported
+    # limit if this default is ever wrong for a given scrip.
+    max_order_qty = FREEZE_QTY_FALLBACK.get(instrument.upper(), 1800)
+    max_lots = max(1, max_order_qty // selected["lot_size"]) if selected["lot_size"] > 0 else lots
+    if lots > max_lots:
+        selected["lots_before_freeze_cap"] = lots
+        lots = max_lots
     selected["lots"] = lots
     selected["qty"] = lots * selected["lot_size"]
     selected["estimated_cost"] = round(selected["qty"] * selected["ltp"], 2)
@@ -2024,6 +2085,7 @@ async def _execute_trade_plan(req: TradeExecuteRequest) -> dict:
         "price": f"{buy_price:.2f}" if req.order_type.upper() == "L" else "0",
         "product": req.product,
         "exchange_segment": chain["fo_segment"],
+        "lot_size": int(sel.get("lot_size") or 0),
     }
     plan = {
         "signal": sig, "chain": chain, "selected": sel, "order_payload": order_payload,
