@@ -1306,7 +1306,13 @@ def _technical_from_market(md: dict, prices: list[float]) -> dict:
         prices = prices + [ltp]
     ema20 = _ema(prices, 20) if prices else None
     ema50 = _ema(prices, 50) if prices else None
-    rsi14 = _rsi(prices, 14) if prices else None
+    # Require a minimum sample size before trusting RSI/momentum/breakout —
+    # with only a handful of ticks these are dominated by quote-to-quote noise
+    # rather than real price action, which was flipping the composite score
+    # sign cycle-to-cycle on essentially flat price action.
+    MIN_TICKS_FOR_NOISY_SIGNALS = 20
+    have_enough_data = len(prices) >= MIN_TICKS_FOR_NOISY_SIGNALS
+    rsi14 = _rsi(prices, 14) if (prices and have_enough_data) else None
     macd = _macd(prices) if prices else {"macd": None, "signal": None, "histogram": None}
     day_range = max(high - low, 0.01)
     vwap_proxy = (high + low + ltp) / 3 if ltp else 0
@@ -1341,15 +1347,23 @@ def _technical_from_market(md: dict, prices: list[float]) -> dict:
         score += 0.10; reasons.append("price_above_vwap_proxy")
     elif ltp:
         score -= 0.10; reasons.append("price_below_vwap_proxy")
-    # opening range / intraday breakout proxy
-    if ltp >= high - day_range * 0.15 and change > 0:
-        score += 0.14; reasons.append("near_day_high_breakout")
-    if ltp <= low + day_range * 0.15 and change < 0:
-        score -= 0.14; reasons.append("near_day_low_breakdown")
-    if momentum_5m > 0.08:
-        score += 0.10; reasons.append("positive_5m_momentum")
-    elif momentum_5m < -0.08:
-        score -= 0.10; reasons.append("negative_5m_momentum")
+    # opening range / intraday breakout proxy — tightened from 0.15 to 0.06 of the
+    # day's range so this only fires on genuine proximity to the extreme, not a
+    # wide 15%-of-range zone that quote jitter wanders in and out of repeatedly.
+    # Also gated behind have_enough_data so it doesn't fire on thin early-session data.
+    if have_enough_data:
+        if ltp >= high - day_range * 0.06 and change > 0:
+            score += 0.14; reasons.append("near_day_high_breakout")
+        if ltp <= low + day_range * 0.06 and change < 0:
+            score -= 0.14; reasons.append("near_day_low_breakdown")
+        # momentum threshold widened from 0.08% to 0.20% so sub-point quote noise
+        # (a couple of points on a ~24,000 index) can't flip this each cycle.
+        if momentum_5m > 0.20:
+            score += 0.10; reasons.append("positive_5m_momentum")
+        elif momentum_5m < -0.20:
+            score -= 0.10; reasons.append("negative_5m_momentum")
+    else:
+        reasons.append("thin_data_momentum_breakout_skipped")
 
     score = _clamp(score, -1.0, 1.0)
     bias = "BULLISH" if score >= 0.25 else "BEARISH" if score <= -0.25 else "NEUTRAL"
