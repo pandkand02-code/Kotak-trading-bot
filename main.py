@@ -1305,6 +1305,17 @@ def _clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
 
 
+def _round_to_tick(price: float, tick: float = 0.05) -> float:
+    """NSE F&O options trade in fixed tick-size increments (0.05). A limit price
+    that isn't an exact multiple gets rejected outright by the exchange (error
+    code 16283: 'Order price is not a multiple of tick size') — this happened in
+    practice because ltp * (1 + slippage%) rarely lands on a clean 0.05 step."""
+    if tick <= 0:
+        return round(price, 2)
+    steps = round(price / tick)
+    return round(steps * tick, 2)
+
+
 def _ema(values: list[float], period: int) -> float | None:
     if not values:
         return None
@@ -2167,7 +2178,7 @@ async def _execute_trade_plan(req: TradeExecuteRequest) -> dict:
         return {"success": False, "stage": "risk", "error": risk_reason, "signal": sig, "chain": chain, "risk": risk_engine.state()}
     if req.order_type.upper() == "MKT" and not req.allow_market_order:
         return {"success": False, "stage": "order_guard", "error": "MKT blocked unless allow_market_order=true"}
-    buy_price = max(0.05, round(sel["ltp"] * (1 + max(0, req.max_slippage_pct) / 100.0), 2))
+    buy_price = max(0.05, _round_to_tick(sel["ltp"] * (1 + max(0, req.max_slippage_pct) / 100.0)))
     order_payload = {
         "session_id": req.session_id,
         "trading_symbol": sel["p_trd_symbol"],
