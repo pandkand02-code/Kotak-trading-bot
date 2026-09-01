@@ -545,6 +545,65 @@ async def _ohlc_via_yahoo(c: httpx.AsyncClient, instrument: str):
         "prev_close": meta.get("regularMarketPreviousClose") or meta.get("chartPreviousClose"),
     }, None
 
+# Cache of {instrument: {"date": "YYYY-MM-DD", "h":..,"l":..,"c":..}} so we only fetch
+# the previous trading day's true H/L/C once per day, not on every quote poll.
+_prev_day_ohlc_cache: dict[str, dict] = {}
+
+async def _prev_day_hlc_via_yahoo(c: httpx.AsyncClient, instrument: str):
+    """Fetches the PREVIOUS completed trading day's real high/low/close — needed for
+    classic floor-trader pivot support/resistance levels. _ohlc_via_yahoo only gives
+    today's day-range and a bare prevClose (no prior day's H/L), so this does a
+    separate small daily-range request and picks the second-to-last daily bar."""
+    today_key = _ist_now().strftime("%Y-%m-%d")
+    cached = _prev_day_ohlc_cache.get(instrument.upper())
+    if cached and cached.get("date") == today_key:
+        return {"h": cached["h"], "l": cached["l"], "c": cached["c"]}, None
+    sym = _YAHOO_SYM.get(instrument.upper())
+    if not sym:
+        return None, f"no yahoo symbol for {instrument}"
+    sym_encoded = sym.replace("^", "%5E")
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sym_encoded}?interval=1d&range=5d"
+    try:
+        r = await c.get(url, headers={"User-Agent": _YAHOO_UA, "Accept": "application/json"})
+    except httpx.HTTPError as e:
+        return None, f"transport: {type(e).__name__}: {e}"
+    if r.status_code != 200:
+        return None, f"HTTP {r.status_code}"
+    data, err = safe_json(r)
+    if err:
+        return None, err
+    try:
+        result = data["chart"]["result"][0]
+        quote = result["indicators"]["quote"][0]
+        highs, lows, closes = quote["high"], quote["low"], quote["close"]
+        # Last index is today's (possibly incomplete) bar; second-to-last is
+        # yesterday's fully completed session — what pivots should be based on.
+        idx = -2 if len(highs) >= 2 and highs[-1] is not None else -1
+        h, l, cl = highs[idx], lows[idx], closes[idx]
+        if h is None or l is None or cl is None:
+            return None, "prev day bar had null OHLC"
+    except (KeyError, IndexError, TypeError) as e:
+        return None, f"unexpected shape: {type(e).__name__}"
+    _prev_day_ohlc_cache[instrument.upper()] = {"date": today_key, "h": h, "l": l, "c": cl}
+    return {"h": h, "l": l, "c": cl}, None
+
+def _pivot_levels(h: float, l: float, c: float) -> dict:
+    """Classic floor-trader pivot points from the previous day's H/L/C — standard
+    intraday support/resistance zones widely watched by index traders."""
+    pp = (h + l + c) / 3
+    r1 = 2 * pp - l
+    s1 = 2 * pp - h
+    r2 = pp + (h - l)
+    s2 = pp - (h - l)
+    r3 = h + 2 * (pp - l)
+    s3 = l - 2 * (h - pp)
+    return {
+        "pivot": round(pp, 2),
+        "r1": round(r1, 2), "r2": round(r2, 2), "r3": round(r3, 2),
+        "s1": round(s1, 2), "s2": round(s2, 2), "s3": round(s3, 2),
+        "prev_high": round(h, 2), "prev_low": round(l, 2), "prev_close": round(c, 2),
+    }
+
 @app.post("/quotes/ltp")
 async def get_ltp(req: QuoteRequest):
     sess = get_session(req.session_id)
@@ -599,10 +658,12 @@ async def get_market_data(req: QuoteRequest):
         results = await asyncio.gather(
             _ohlc_via_yahoo(c, req.instrument),
             _ohlc_via_yahoo(c, "VIX"),
+            _prev_day_hlc_via_yahoo(c, req.instrument),
             return_exceptions=True
         )
         yahoo_data, yahoo_err = results[0] if not isinstance(results[0], Exception) else (None, str(results[0]))
         yahoo_vix, yahoo_vix_err = results[1] if not isinstance(results[1], Exception) else (None, str(results[1]))
+        prev_day, prev_day_err = results[2] if not isinstance(results[2], Exception) else (None, str(results[2]))
     ltp_item = None
     vix_item = None
     target_inst_clean = _clean_symbol(inst["neo_symbol"])
@@ -705,6 +766,12 @@ async def get_market_data(req: QuoteRequest):
             change_abs = direct_change_abs
         else:
             change_abs = (ltp_inst - prev_close) if prev_close else 0
+        pivots = None
+        if isinstance(prev_day, dict):
+            try:
+                pivots = _pivot_levels(prev_day["h"], prev_day["l"], prev_day["c"])
+            except Exception:
+                pivots = None
         return {
             "success":     True,
             "instrument":  req.instrument,
@@ -723,6 +790,8 @@ async def get_market_data(req: QuoteRequest):
             "raw_ltp_item": ltp_item,
             "raw_yahoo":    yahoo_data,
             "yahoo_error":  yahoo_err,
+            "pivots":       pivots,
+            "pivots_error": prev_day_err if not pivots else None,
         }
     async with httpx.AsyncClient(timeout=10) as c:
         single_item, single_err = await _get_quote_item(c, sess, inst["neo_symbol"], inst["exchange_segment"])
@@ -1373,6 +1442,41 @@ def _technical_from_market(md: dict, prices: list[float]) -> dict:
     else:
         reasons.append("thin_data_momentum_breakout_skipped")
 
+    # Support/resistance zones from previous day's classic floor pivots. Price
+    # stalling just under a resistance level (without breaking it) commonly sees
+    # rejection; stalling just above a support level commonly sees a bounce. A
+    # genuine breakout/breakdown past the level (with momentum behind it) flips
+    # that read into a continuation signal instead.
+    sr_info = None
+    pivots = md.get("pivots")
+    if pivots and ltp:
+        levels = sorted([pivots["s3"], pivots["s2"], pivots["s1"], pivots["pivot"],
+                          pivots["r1"], pivots["r2"], pivots["r3"]])
+        resistance_above = min([lv for lv in levels if lv > ltp], default=None)
+        support_below    = max([lv for lv in levels if lv < ltp], default=None)
+        tolerance = max(day_range * 0.10, ltp * 0.0015) if ltp else 0
+        near_resistance  = resistance_above is not None and (resistance_above - ltp) <= tolerance
+        near_support     = support_below    is not None and (ltp - support_below) <= tolerance
+        broke_resistance = resistance_above is not None and ltp > resistance_above + tolerance * 0.3
+        broke_support    = support_below    is not None and ltp < support_below - tolerance * 0.3
+
+        if near_resistance and not broke_resistance:
+            score -= 0.12; reasons.append(f"near_resistance_{resistance_above}")
+        if near_support and not broke_support:
+            score += 0.12; reasons.append(f"near_support_{support_below}")
+        if have_enough_data:
+            if broke_resistance and momentum_5m > 0:
+                score += 0.12; reasons.append(f"resistance_breakout_{resistance_above}")
+            if broke_support and momentum_5m < 0:
+                score -= 0.12; reasons.append(f"support_breakdown_{support_below}")
+
+        sr_info = {
+            "pivot_levels": pivots,
+            "resistance_above": resistance_above, "support_below": support_below,
+            "near_resistance": near_resistance, "near_support": near_support,
+            "broke_resistance": broke_resistance, "broke_support": broke_support,
+        }
+
     score = _clamp(score, -1.0, 1.0)
     bias = "BULLISH" if score >= 0.25 else "BEARISH" if score <= -0.25 else "NEUTRAL"
     data_quality = min(100, 25 + len(prices) * 3)
@@ -1389,6 +1493,7 @@ def _technical_from_market(md: dict, prices: list[float]) -> dict:
         "ema50": round(ema50, 2) if ema50 else None,
         "rsi14": round(rsi14, 2) if rsi14 is not None else None,
         "macd": macd,
+        "support_resistance": sr_info,
         "reasons": reasons,
     }
 
@@ -1970,10 +2075,12 @@ async def _select_affordable_option(
             "cheapest_seen": cheapest,
             "candidates": candidates[:30],
         }
-    # Production selector: choose the minimum premium that still looks tradable,
-    # then prefer the nearer strike. This matches small-wallet option buying.
-    # Extreme zero/liquidity-trap contracts are filtered by min_option_ltp.
-    affordable.sort(key=lambda c: (c["ltp"], c["distance_from_atm"]))
+    # Selector: prefer strikes CLOSEST TO ATM among affordable ones (better delta/
+    # sensitivity to actual index moves — a far-OTM cheap contract barely moves on
+    # small moves), falling back further OTM only when nearer strikes aren't
+    # affordable within budget. Previously this sorted cheapest-first, which always
+    # picked deep-OTM "lottery ticket" strikes regardless of budget headroom.
+    affordable.sort(key=lambda c: (c["distance_from_atm"], c["ltp"]))
     selected = affordable[0]
     lots = int(budget // selected["per_lot_cost"]) if selected["per_lot_cost"] > 0 else 0
     lots = max(1, lots)
@@ -2049,8 +2156,10 @@ async def _execute_trade_plan(req: TradeExecuteRequest) -> dict:
     )
     if not chain.get("success"):
         return {"success": False, "stage": "affordable_chain", "error": chain.get("error"), "signal": sig, "chain": chain}
-    if _expiry_is_today(chain.get("expiry")) and not req.allow_expiry_day:
-        return {"success": False, "stage": "expiry_guard", "error": "expiry day blocked", "signal": sig, "chain": chain}
+    # Expiry-day guard removed by request — trading is no longer blocked on the
+    # instrument's own expiry day. Note: expiry-day options see much faster time
+    # decay and sharper price swings (especially as the session nears close),
+    # since that's the day open interest is heaviest and gamma is highest near ATM.
     sel = chain["selected"]
     required = float(sel.get("estimated_cost") or 0)
     risk_ok, risk_reason = risk_engine.can_trade(required)
