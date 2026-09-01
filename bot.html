@@ -1789,6 +1789,15 @@ async function dispatchAutoTrade(){
     return;
   }
 
+  // Only one live position at a time. Without this, the bot could fire a new
+  // trade every cycle while an earlier one is still open — stacking multiple
+  // concurrent option positions instead of managing one at a time.
+  const openLiveTrades = G.open.filter(t => !t.isPaper);
+  if(openLiveTrades.length > 0){
+    log('Auto-trade SKIP — position already open ('+openLiveTrades[0].symbol+'), waiting for it to close','info');
+    return;
+  }
+
   const sinceLast = Date.now() - G.lastEntryTs;
   if(sinceLast < G.cooldownMs){
     log('Auto-trade SKIP — cooldown','info');
