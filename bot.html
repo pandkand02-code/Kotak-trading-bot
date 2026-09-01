@@ -1644,8 +1644,8 @@ function paintAdvancedSignal(r){
   if(sb){ sb.textContent = `${r.action} · ${conf}%`; sb.className='badge '+(dir==='CE'?'bg':dir==='PE'?'br':'bd'); }
   G.sig = {direction: dir, confidence: conf, action: r.action, score: r.composite_score, _fromBackend: true, _ts: Date.now(), raw: r};
   G.news = {sentiment_score:r.news?.sentiment_score||0, confidence:r.news?.confidence||0, headlines:r.news?.headlines||[]};
-  const sr = r.technical?.support_resistance;
-  const srTxt = sr ? ` | R:${sr.resistance_above ?? '-'} S:${sr.support_below ?? '-'}` : '';
+  const srZone = r.technical?.support_resistance;
+  const srTxt = srZone ? ` | R:${srZone.resistance_above ?? '-'} S:${srZone.support_below ?? '-'}` : '';
   log(`ADVANCED SIGNAL → ${r.action} | Conf ${conf}% | Sentiment ${r.news?.sentiment_score ?? 0} (${r.news?.bias || 'NA'}) | Tech ${r.technical?.technical_score ?? 0}${srTxt}`,'trade');
 }
 
