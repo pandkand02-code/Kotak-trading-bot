@@ -911,28 +911,24 @@ const ENTRY_OPEN_MIN  = 9*60 + 30;
 const ENTRY_CLOSE_MIN = 15*60 + 15;  // aligned with backend's _entry_window_status() cutoff
 const AUTO_EXIT_MIN   = 15*60 + 20;
 
-function _isExpiryDay(){
-  const dow = _istDOW();
-  if(G.inst === 'NIFTY'  && dow === 2) return true;
-  if(G.inst === 'SENSEX' && dow === 5) return true;
-  return false;
-}
-
 function entryWindowAllowed(){
   // TEMPORARY TEST OVERRIDE: when G.debugBypassWindow is on, skip the time-of-day
-  // and expiry-day checks so you can confirm the order-placement pipeline itself
-  // works without waiting for a specific time window. The exchange still enforces
-  // its own real market hours independently (Kotak will reject orders if the
-  // market is genuinely closed), so this only bypasses our own extra safety
-  // margin, not actual trading-hours protection. Turn this back OFF once you've
-  // confirmed orders place correctly — see the TEST MODE button next to LIVE auto-trade.
+  // check so you can confirm the order-placement pipeline itself works without
+  // waiting for a specific time window. The exchange still enforces its own real
+  // market hours independently (Kotak will reject orders if the market is
+  // genuinely closed), so this only bypasses our own extra safety margin, not
+  // actual trading-hours protection. Turn this back OFF once you've confirmed
+  // orders place correctly — see the TEST MODE button next to LIVE auto-trade.
   if(G.debugBypassWindow) return {ok:true, bypassed:true};
   const mkt = marketStatus();
   if(!mkt.open) return {ok:false, reason: mkt.reason};
   const mins = _istMins();
   if(mins < ENTRY_OPEN_MIN) return {ok:false, reason: `pre-09:30 opening window`};
   if(mins >= ENTRY_CLOSE_MIN) return {ok:false, reason: `after 15:15 cut-off`};
-  if(_isExpiryDay()) return {ok:false, reason: `${G.inst} expiry day risk`};
+  // Expiry-day guard removed by request — the bot will now trade normally on
+  // expiry days (NIFTY Tuesday / SENSEX Friday) instead of refusing entries.
+  // Note: expiry-day options see faster time decay and sharper price swings,
+  // especially near close — that risk is no longer being filtered out here.
   return {ok:true};
 }
 
@@ -1648,7 +1644,9 @@ function paintAdvancedSignal(r){
   if(sb){ sb.textContent = `${r.action} · ${conf}%`; sb.className='badge '+(dir==='CE'?'bg':dir==='PE'?'br':'bd'); }
   G.sig = {direction: dir, confidence: conf, action: r.action, score: r.composite_score, _fromBackend: true, _ts: Date.now(), raw: r};
   G.news = {sentiment_score:r.news?.sentiment_score||0, confidence:r.news?.confidence||0, headlines:r.news?.headlines||[]};
-  log(`ADVANCED SIGNAL → ${r.action} | Conf ${conf}% | Sentiment ${r.news?.sentiment_score ?? 0} (${r.news?.bias || 'NA'}) | Tech ${r.technical?.technical_score ?? 0}`,'trade');
+  const sr = r.technical?.support_resistance;
+  const srTxt = sr ? ` | R:${sr.resistance_above ?? '-'} S:${sr.support_below ?? '-'}` : '';
+  log(`ADVANCED SIGNAL → ${r.action} | Conf ${conf}% | Sentiment ${r.news?.sentiment_score ?? 0} (${r.news?.bias || 'NA'}) | Tech ${r.technical?.technical_score ?? 0}${srTxt}`,'trade');
 }
 
 async function analyze(){
