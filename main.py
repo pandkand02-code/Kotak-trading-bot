@@ -619,6 +619,28 @@ async def get_ltp(req: QuoteRequest):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+class OptionLtpRequest(BaseModel):
+    session_id: str
+    p_symbol: str
+    exchange: str = "nse_fo"
+
+@app.post("/quotes/option_ltp")
+async def get_option_ltp(req: OptionLtpRequest):
+    """Live LTP for a single option leg by its p_symbol — used by the position
+    monitor (startMon/poll in bot.html) to check SL/TP every few seconds. This
+    endpoint was missing entirely; every poll cycle was hitting a 404, so
+    positions were computing correct SL/TP values but the exit-check code was
+    never reached because the LTP fetch always failed first."""
+    sess = get_session(req.session_id)
+    async with httpx.AsyncClient(timeout=10) as c:
+        try:
+            ltp, err = await _ltp_via_script_details(c, sess, req.p_symbol, req.exchange)
+            if err or ltp is None:
+                return {"ok": False, "error": err or "no ltp"}
+            return {"ok": True, "ltp": ltp}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
 @app.post("/quotes/ohlc")
 async def get_ohlc(req: QuoteRequest):
     sess = get_session(req.session_id)
@@ -1517,7 +1539,14 @@ def _market_regime_score(md: dict, technical: dict) -> dict:
     if vix >= 22:
         score -= 0.25; reasons.append("high_vix_avoid_option_buying")
     elif vix <= 13:
-        score += 0.10; reasons.append("low_vix_stable")
+        # Previously added +0.10 here treating "calm market" as a bullish signal —
+        # that's a category error (low VIX means low expected volatility, not a
+        # directional bias) and, since India VIX sits well under 13 most sessions,
+        # it was adding a near-constant bullish nudge to every single signal
+        # regardless of actual price action. No score effect now — still logged
+        # for visibility, since low VIX does mean an option premium is priced
+        # cheaply relative to a big move, which is informational, not directional.
+        reasons.append("low_vix_stable_no_directional_bias")
     else:
         reasons.append("normal_vix")
     if abs(change) >= 0.35:
@@ -1545,13 +1574,19 @@ async def advanced_signal(req: AdvancedSignalRequest):
     # blended in with weight 0.2 even on "0 headlines" reads, quietly dragging the
     # composite score around). News is still fetched and returned in the response for
     # visibility/debugging, but no longer affects composite_score, confidence, or action.
+    # VIX no longer contributes a standalone directional term here — it was
+    # `(0.10 if vix<20 else -0.10)*0.10`, which added a constant +0.01 bullish
+    # nudge to composite on essentially every computation (India VIX is under 20
+    # nearly all the time), quietly biasing every signal toward BUY_CE regardless
+    # of actual price action. VIX still affects things properly via regime["score"]
+    # (the >=22 high-vix caution penalty) and via confidence, just not as a
+    # constant directional push.
     composite = (
-        technical["technical_score"] * 0.80 +
-        regime["score"] * 0.10 +
-        (0.10 if technical.get("vix", 15) < 20 else -0.10) * 0.10
+        technical["technical_score"] * 0.90 +
+        regime["score"] * 0.10
     )
     confidence = int(_clamp(
-        technical["confidence"] * 0.80 +
+        technical["confidence"] * 0.90 +
         abs(regime["score"]) * 100 * 0.10 +
         10,
         0, 100
@@ -1581,7 +1616,7 @@ async def advanced_signal(req: AdvancedSignalRequest):
         "confidence": confidence,
         "composite_score": composite,
         "min_confidence": req.min_confidence,
-        "weights": {"technical": 0.80, "news": 0.00, "market_regime": 0.10, "vix": 0.10},
+        "weights": {"technical": 0.90, "news": 0.00, "market_regime": 0.10},
         "technical": technical,
         "news": news,
         "market_regime": regime,
