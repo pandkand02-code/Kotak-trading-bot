@@ -24,9 +24,10 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RiskConfig:
-    daily_profit_pct:  float = 10.0  # optional lock-in at +10%
-    daily_loss_pct:    float = 5.0   # user spec: stop trading at -5%
-    overall_loss_pct:  float = 5.0   # hard stop aligned to daily loss cap
+    daily_profit_pct:  float = 30.0  # overall profit lock-in, updated per user request
+    daily_loss_pct:    float = 20.0  # overall loss cap, updated per user request
+    overall_loss_pct:  float = 20.0  # kept aligned with daily_loss_pct — otherwise this
+                                      # would still halt at the old threshold independently
     per_trade_tp_pct:  float = 3.0   # default take profit
     per_trade_sl_pct:  float = 2.0   # default stop loss
     capital_per_trade_pct: float = 1.0  # user spec: max 1% capital at risk/deployed per trade
