@@ -1742,6 +1742,101 @@ async def chain_atm(req: ChainRequest):
         "strikes":    [out_strikes[r["strike"]] for r in chain_meta["strikes"]],
     }
 
+class MCXChainPreviewRequest(BaseModel):
+    session_id: str
+    symbol: str = "CRUDEOIL"
+    n_strikes: int = 5
+    strike_step: float = 50.0
+
+@app.post("/chain/mcx_preview")
+async def chain_mcx_preview(req: MCXChainPreviewRequest):
+    """READ-ONLY preview of an MCX commodity options chain — no order placement
+    wiring yet. This is step 1 of adding MCX support: confirm we can actually
+    resolve the scrip master, find the front-month future as a spot reference,
+    and pull live CE/PE premiums, before building affordability/selection/order
+    logic on top (which is where NSE required several rounds of real fixes).
+    Field-name assumptions (pSymbolName, pOptionType, lExpiryDate, etc.) are
+    carried over from the NSE scrip master schema and may need adjusting once
+    we see real MCX rows — check the 'debug' field in the response if anything
+    looks off."""
+    sess = get_session(req.session_id)
+    debug: dict = {}
+    try:
+        fut = await scrip_master.nearest_future(sess, req.symbol, segment="mcx_fo")
+    except Exception as e:
+        logger.error(f"chain/mcx_preview scrip master (future lookup): {e}")
+        return {"success": False, "error": f"scrip master future lookup: {e}", "symbol": req.symbol}
+    if not fut:
+        return {"success": False, "error": f"no futures contract found for {req.symbol} in mcx_fo scrip master",
+                "symbol": req.symbol, "hint": "check pSymbolName spelling in the mcx_fo CSV — may not be exactly 'CRUDEOIL'"}
+    debug["front_month_future"] = fut
+
+    async with httpx.AsyncClient(timeout=15) as c:
+        spot, spot_err = await _ltp_via_script_details(c, sess, fut["p_symbol"], "mcx_fo")
+    if spot is None or spot <= 0:
+        return {"success": False, "error": f"could not fetch future LTP as spot reference: {spot_err}",
+                "symbol": req.symbol, "debug": debug}
+    debug["spot_source"] = "front_month_future_ltp"
+
+    try:
+        chain_meta = await scrip_master.find_atm_chain(
+            sess, req.symbol, spot, n=req.n_strikes, step=req.strike_step, segment="mcx_fo"
+        )
+    except Exception as e:
+        logger.error(f"chain/mcx_preview find_atm_chain: {e}")
+        return {"success": False, "error": f"scrip master options lookup: {e}", "symbol": req.symbol,
+                "spot": spot, "debug": debug}
+    if not chain_meta["strikes"]:
+        return {"success": False, "error": "no option strikes resolved for this symbol/segment",
+                "symbol": req.symbol, "spot": spot, "debug": debug,
+                "hint": "check pSymbolName in mcx_fo CSV matches exactly, and that options (not just futures) exist for this symbol"}
+
+    legs: list[tuple[str, str, dict]] = []
+    for row in chain_meta["strikes"]:
+        for side in ("ce", "pe"):
+            leg = row.get(side)
+            if leg and leg.get("p_symbol"):
+                legs.append((str(row["strike"]), side, leg))
+    out_strikes: dict[float, dict] = {
+        r["strike"]: {"strike": r["strike"], "atm": r["strike"] == chain_meta["atm"], "ce": None, "pe": None}
+        for r in chain_meta["strikes"]
+    }
+    async with httpx.AsyncClient(timeout=15) as c:
+        for i in range(0, len(legs), 8):
+            batch = legs[i:i + 8]
+            results = await asyncio.gather(*[
+                _ltp_via_script_details(c, sess, leg["p_symbol"], "mcx_fo")
+                for _, _, leg in batch
+            ], return_exceptions=True)
+            for (strike_key, side, leg), result in zip(batch, results):
+                if isinstance(result, Exception):
+                    ltp, err = None, str(result)
+                else:
+                    ltp, err = result
+                lot_size = leg["lot_size"]
+                out_strikes[float(strike_key)][side] = {
+                    "ltp":          ltp if ltp is not None else 0.0,
+                    "p_symbol":     leg["p_symbol"],
+                    "p_trd_symbol": leg["p_trd_symbol"],
+                    "lot_size":     lot_size,
+                    "cost_per_lot": round((ltp or 0) * lot_size, 2) if lot_size else None,
+                    "error":        err,
+                }
+            if i + 8 < len(legs):
+                await asyncio.sleep(1.0)
+    return {
+        "success":       True,
+        "symbol":        req.symbol,
+        "front_month_future": fut,
+        "spot":          spot,
+        "atm":           chain_meta["atm"],
+        "expiry":        chain_meta["expiry"],
+        "step":          chain_meta["step"],
+        "strikes":       [out_strikes[r["strike"]] for r in chain_meta["strikes"]],
+        "debug":         debug,
+        "note":          "READ-ONLY preview — order placement is not wired up for MCX yet.",
+    }
+
 class RiskBookRequest(BaseModel):
     pnl: float
 
