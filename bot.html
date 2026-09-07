@@ -389,8 +389,8 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
           <input type="range" id="tpS" min="2" max="10" step="0.5" value="3" oninput="document.getElementById('tpLbl').textContent=this.value+'%'">
         </div>
         <div class="sl-row">
-          <div class="sl-hdr"><span style="color:var(--dim)">STOP LOSS</span><span style="color:var(--red)" id="slLbl">2%</span></div>
-          <input type="range" id="slS" min="0.5" max="5" step="0.5" value="2" oninput="document.getElementById('slLbl').textContent=this.value+'%'">
+          <div class="sl-hdr"><span style="color:var(--dim)">STOP LOSS</span><span style="color:var(--red)" id="slLbl">3.5%</span></div>
+          <input type="range" id="slS" min="0.5" max="5" step="0.5" value="3.5" oninput="document.getElementById('slLbl').textContent=this.value+'%'">
         </div>
         <div class="sl-row">
           <div class="sl-hdr"><span style="color:var(--dim)">MAX DAILY LOSS</span><span style="color:var(--gold)" id="mlLbl">3%</span></div>
@@ -529,6 +529,7 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
         <div style="display:flex;gap:6px;flex-wrap:wrap">
           <button class="btn btn-b btn-sm" onclick="testQuoteAPI()">TEST QUOTE</button>
           <button class="btn btn-r btn-sm" onclick="testKotakOrder()">TEST ORDER</button>
+          <button class="btn btn-sm" style="color:var(--gold);border-color:var(--gold)" onclick="testMcxChain()">TEST MCX CHAIN</button>
           <button class="btn btn-sm" style="color:var(--dim);border-color:var(--dim)" onclick="clrLog()">CLEAR</button>
         </div>
       </div>
@@ -672,6 +673,26 @@ async function testQuoteAPI(){
     if(res.raw_yahoo){ log('Yahoo OHLC: '+JSON.stringify(res.raw_yahoo),'success'); }
     if(res.raw_ltp_item){ log('Raw Kotak /script-details: '+JSON.stringify(res.raw_ltp_item),'info'); }
   }catch(e){ log('Quote API test failed: '+e.message,'error'); }
+}
+
+async function testMcxChain(){
+  if(!G.sid){log('Login first.','warn');return;}
+  log('READ-ONLY: fetching MCX CRUDEOIL option chain preview (no order placement)...','info');
+  try{
+    const res = await api('/chain/mcx_preview',{session_id:G.sid, symbol:'CRUDEOIL', n_strikes:5, strike_step:50});
+    if(!res.success){
+      log('MCX chain preview FAILED: '+res.error+(res.hint?(' | hint: '+res.hint):''),'error');
+      if(res.debug) log('debug: '+JSON.stringify(res.debug).substring(0,400),'warn');
+      return;
+    }
+    log(`✓ MCX CRUDEOIL: front-month future=${res.front_month_future.p_trd_symbol} spot(future LTP)=₹${res.spot} ATM=${res.atm} expiry=${res.expiry}`,'success');
+    res.strikes.forEach(s=>{
+      const ceInfo = s.ce ? `CE ₹${s.ce.ltp} (lot ${s.ce.lot_size}, cost/lot ₹${s.ce.cost_per_lot})` : 'CE n/a';
+      const peInfo = s.pe ? `PE ₹${s.pe.ltp} (lot ${s.pe.lot_size}, cost/lot ₹${s.pe.cost_per_lot})` : 'PE n/a';
+      log(`  Strike ${s.strike}${s.atm?' [ATM]':''}: ${ceInfo} | ${peInfo}`,'info');
+    });
+    log('Note: this is READ-ONLY. No order placement is wired up for MCX yet.','warn');
+  }catch(e){ log('MCX chain preview test failed: '+e.message,'error'); }
 }
 
 async function testKotakOrder(){
@@ -872,7 +893,19 @@ async function fetchWallet(){
 
 async function fetchPos(){
   if(!G.sid) return;
-  try{const d=await api('/positions',{session_id:G.sid});if(d?.data)log('Positions: '+d.data.length+' entries','info');}catch{}
+  try{
+    const d=await api('/positions',{session_id:G.sid});
+    if(d?.data){
+      log('Positions: '+d.data.length+' entries','info');
+      // TEMPORARY DIAGNOSTIC: dump the raw shape of Kotak's own position data so we
+      // can identify its real P&L field names (rlPnl/urPnl/mtm/etc. — unconfirmed)
+      // and wire the displayed P&L to Kotak's actual numbers instead of the bot's
+      // own internal, pre-charges estimate. Remove this once fixed.
+      if(d.data.length > 0){
+        log('RAW POSITION SAMPLE: '+JSON.stringify(d.data[0]).substring(0,600),'info');
+      }
+    }
+  }catch{}
 }
 
 function bs(S,K,T,sig,r,type){
