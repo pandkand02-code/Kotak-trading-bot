@@ -59,6 +59,8 @@ class ScripMaster:
                 paths_map["bse_fo"] = url_s
             elif "bse_cm" in url_s:
                 paths_map["bse_cm"] = url_s
+            elif "mcx_fo" in url_s:
+                paths_map["mcx_fo"] = url_s
         if not paths_map:
             raise RuntimeError(f"masterscrip: no segment files in {files[:3]}")
         self._paths_cache = (today, paths_map)
@@ -124,6 +126,48 @@ class ScripMaster:
                 "lot_size":     int(float(row.get("iLotSize") or row.get("lotSize") or 0) or 0),
             })
         return out
+
+    async def nearest_future(
+        self,
+        sess: dict,
+        symbol: str,
+        segment: str = "mcx_fo",
+    ) -> dict | None:
+        """Commodities have no index/spot the way NIFTY has Nifty 50 — the
+        front-month futures contract's LTP is the standard 'spot' reference used
+        to compute ATM for the options chain. Returns the nearest-expiry futures
+        row for `symbol` (e.g. CRUDEOIL), or None if not found.
+
+        NOTE: field names here (pInstType, pOptionType blank for futures, etc.)
+        are best-effort based on Kotak's documented CSV schema — first real MCX
+        data may need a quick adjustment once we see it."""
+        rows = await self.load(sess, segment)
+        futs = []
+        for row in rows:
+            sname = row.get("pSymbolName") or row.get("pSymbol") or ""
+            otype = (row.get("pOptionType") or "").strip()
+            if sname.upper() != symbol.upper():
+                continue
+            if otype in ("CE", "PE"):
+                continue  # skip options rows, we want the future
+            futs.append(row)
+        if not futs:
+            return None
+
+        def expiry_sort_key(r):
+            e = r.get("lExpiryDate", "")
+            try:
+                return (0, int(e))
+            except ValueError:
+                return (1, e)
+        futs.sort(key=expiry_sort_key)
+        nearest = futs[0]
+        return {
+            "p_symbol":     nearest.get("pSymbol", ""),
+            "p_trd_symbol": nearest.get("pTrdSymbol", ""),
+            "expiry":       nearest.get("lExpiryDate", ""),
+            "lot_size":     int(float(nearest.get("iLotSize") or nearest.get("lotSize") or 0) or 0),
+        }
 
     async def find_atm_chain(
         self,
