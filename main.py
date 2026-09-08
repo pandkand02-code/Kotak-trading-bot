@@ -2222,23 +2222,52 @@ async def _select_affordable_option(
     # affordable within budget. Previously this sorted cheapest-first, which always
     # picked deep-OTM "lottery ticket" strikes regardless of budget headroom.
     affordable.sort(key=lambda c: (c["distance_from_atm"], c["ltp"]))
-    selected = affordable[0]
-    lots = int(budget // selected["per_lot_cost"]) if selected["per_lot_cost"] > 0 else 0
-    lots = max(1, lots)
-    # Safety cap: exchanges enforce a per-order "freeze quantity" (Kotak rejects
-    # anything above it, e.g. "maximum allowed quantity in this scrip is 1801 per
-    # order"). Very cheap premiums (paise-level) can otherwise make budget-maximizing
-    # math pick an absurd lot count. This conservative fallback avoids ever attempting
-    # such an order; /orders/place also auto-retries with the exchange's own reported
-    # limit if this default is ever wrong for a given scrip.
+
+    # Minimum capital utilization filter: on very cheap premiums, the exchange's
+    # per-order freeze-quantity cap (not your wallet) becomes the binding limit —
+    # e.g. a ₹0.10 NIFTY option caps out around ₹180 deployed even with a ₹5,000
+    # budget, since 24 lots (the freeze-qty ceiling) × ₹7.50/lot ≈ ₹180. A full
+    # take-profit hit on that stranded ₹180 is a few rupees — nowhere near enough
+    # to cover Kotak's ₹10-20/order round-trip brokerage plus STT/exchange/GST.
+    # Skip candidates where the freeze cap would strand most of the budget unused,
+    # and prefer the nearest-to-ATM strike that can actually deploy a meaningful
+    # share of it.
+    MIN_CAPITAL_UTILIZATION_PCT = 40.0
     max_order_qty = FREEZE_QTY_FALLBACK.get(instrument.upper(), 1800)
-    max_lots = max(1, max_order_qty // selected["lot_size"]) if selected["lot_size"] > 0 else lots
-    if lots > max_lots:
-        selected["lots_before_freeze_cap"] = lots
-        lots = max_lots
-    selected["lots"] = lots
-    selected["qty"] = lots * selected["lot_size"]
-    selected["estimated_cost"] = round(selected["qty"] * selected["ltp"], 2)
+
+    def _size_candidate(cand: dict) -> dict:
+        lots = int(budget // cand["per_lot_cost"]) if cand["per_lot_cost"] > 0 else 0
+        lots = max(1, lots)
+        max_lots = max(1, max_order_qty // cand["lot_size"]) if cand["lot_size"] > 0 else lots
+        freeze_capped = lots > max_lots
+        if freeze_capped:
+            cand["lots_before_freeze_cap"] = lots
+            lots = max_lots
+        cand["lots"] = lots
+        cand["qty"] = lots * cand["lot_size"]
+        cand["estimated_cost"] = round(cand["qty"] * cand["ltp"], 2)
+        cand["capital_utilization_pct"] = round((cand["estimated_cost"] / budget) * 100, 1) if budget > 0 else 0
+        cand["freeze_capped"] = freeze_capped
+        return cand
+
+    selected = None
+    for cand in affordable:
+        sized = _size_candidate(cand)
+        if not sized["freeze_capped"] or sized["capital_utilization_pct"] >= MIN_CAPITAL_UTILIZATION_PCT:
+            selected = sized
+            break
+    if selected is None:
+        # Every affordable strike is freeze-capped below the utilization floor —
+        # still trade the least-bad one (closest to ATM) rather than refuse
+        # outright, but flag it clearly so this is visible, not silent.
+        selected = _size_candidate(affordable[0])
+        selected["capital_utilization_warning"] = (
+            f"Every affordable strike hit the exchange freeze-quantity cap below "
+            f"{MIN_CAPITAL_UTILIZATION_PCT}% capital utilization — only "
+            f"₹{selected['estimated_cost']} of your ₹{round(budget,2)} budget could be "
+            f"deployed. Expected profit at a typical TP% may not cover round-trip "
+            f"brokerage + statutory charges."
+        )
     return {
         "success": True,
         "instrument": instrument, "side": side, "wallet": wallet, "budget": round(budget, 2),
