@@ -586,6 +586,38 @@ async def _ohlc_via_yahoo(c: httpx.AsyncClient, instrument: str):
         "prev_close": meta.get("regularMarketPreviousClose") or meta.get("chartPreviousClose"),
     }, None
 
+async def _yahoo_intraday_bars(c: httpx.AsyncClient, instrument: str, days_back: int, interval: str):
+    """Multi-bar intraday history (unlike _ohlc_via_yahoo, which only gets today's
+    snapshot) — needed for the analyzer's on-demand backtest. Ported from
+    backtest.py's fetch_yahoo_intraday()."""
+    sym = _YAHOO_SYM.get(instrument.upper())
+    if not sym:
+        return None, f"no yahoo symbol for {instrument}"
+    sym_encoded = sym.replace("^", "%5E")
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sym_encoded}?interval={interval}&range={days_back}d"
+    try:
+        r = await c.get(url, headers={"User-Agent": _YAHOO_UA, "Accept": "application/json"})
+    except httpx.HTTPError as e:
+        return None, f"transport: {type(e).__name__}: {e}"
+    if r.status_code != 200:
+        return None, f"HTTP {r.status_code}"
+    data, err = safe_json(r)
+    if err:
+        return None, err
+    try:
+        result = data["chart"]["result"][0]
+        ts = result["timestamp"]
+        quote = result["indicators"]["quote"][0]
+    except (KeyError, IndexError, TypeError) as e:
+        return None, f"unexpected shape: {type(e).__name__}"
+    bars = []
+    for i in range(len(ts)):
+        if quote["close"][i] is None:
+            continue
+        bars.append({"t": ts[i], "open": quote["open"][i], "high": quote["high"][i],
+                     "low": quote["low"][i], "close": quote["close"][i]})
+    return bars, None
+
 # Cache of {instrument: {"date": "YYYY-MM-DD", "h":..,"l":..,"c":..}} so we only fetch
 # the previous trading day's true H/L/C once per day, not on every quote poll.
 _prev_day_ohlc_cache: dict[str, dict] = {}
@@ -2759,3 +2791,338 @@ async def trades(req: SessionRequest):
             return data
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+
+# =============================================================================
+# ANALYZER — fully-parameterized backtest engine for the interactive tuner UI.
+# Every constant that's normally hardcoded in _technical_from_market(),
+# _market_regime_score(), and the composite formula is exposed here as a
+# request field with the SAME default as the live values, so "run with
+# defaults" reproduces the live bot's behavior, and moving any slider changes
+# exactly one thing at a time. This is intentionally kept separate from the
+# live trading functions above — it never touches sessions, orders, or risk
+# state; it only fetches public Yahoo data and runs a synthetic Black-Scholes
+# backtest, identical in spirit to backtest.py but reachable from the UI.
+# =============================================================================
+
+def _analyzer_macd(values: list[float], fast: int, slow: int, signal_period: int) -> dict:
+    if len(values) < slow:
+        return {"macd": None, "signal": None, "histogram": None}
+    macd_line = (_ema(values, fast) or 0) - (_ema(values, slow) or 0)
+    macd_series = []
+    for i in range(slow, len(values) + 1):
+        sub = values[:i]
+        macd_series.append((_ema(sub, fast) or 0) - (_ema(sub, slow) or 0))
+    signal = _ema(macd_series, signal_period) if macd_series else None
+    hist = macd_line - signal if signal is not None else None
+    return {"macd": macd_line, "signal": signal, "histogram": hist}
+
+
+class AnalyzerParams(BaseModel):
+    # --- data window ---
+    instrument: str = "NIFTY"
+    days_back: int = 60
+    interval: str = "15m"
+
+    # --- EMA ---
+    ema_fast_period: int = 20
+    ema_slow_period: int = 50
+    ema_price_above_score: float = 0.18
+    ema_cross_score: float = 0.16
+
+    # --- RSI ---
+    rsi_period: int = 14
+    rsi_bull_low: float = 55
+    rsi_bull_high: float = 70
+    rsi_bull_score: float = 0.16
+    rsi_bear_low: float = 30
+    rsi_bear_high: float = 45
+    rsi_bear_score: float = 0.16
+    rsi_overbought: float = 78
+    rsi_overbought_score: float = 0.10
+    rsi_oversold: float = 22
+    rsi_oversold_score: float = 0.10
+
+    # --- MACD ---
+    macd_fast: int = 12
+    macd_slow: int = 26
+    macd_signal: int = 9
+    macd_score: float = 0.14
+
+    # --- VWAP proxy ---
+    vwap_score: float = 0.10
+
+    # --- breakout / momentum (require min_ticks before trusting these) ---
+    min_ticks_for_noisy_signals: int = 20
+    breakout_range_pct: float = 0.06   # fraction of day range counted as "near extreme"
+    breakout_score: float = 0.14
+    momentum_threshold_pct: float = 0.20
+    momentum_score: float = 0.10
+
+    # --- pivot support/resistance ---
+    pivot_tolerance_range_pct: float = 0.10
+    pivot_tolerance_price_pct: float = 0.0015
+    pivot_reject_score: float = 0.12
+    pivot_breakout_score: float = 0.12
+
+    # --- market regime (VIX / index-move) ---
+    vix_high_threshold: float = 22
+    vix_high_score: float = -0.25
+    change_threshold_pct: float = 0.35
+    change_score: float = 0.10
+
+    # --- composite weights (no-news path; news isn't backtestable historically) ---
+    technical_weight: float = 0.85
+    regime_weight: float = 0.15
+
+    # --- decision thresholds ---
+    min_confidence: int = 60
+    composite_threshold: float = 0.22
+
+    # --- trade management ---
+    sl_pct: float = 3.5
+    tp_pct: float = 3.0
+    entry_open_min: int = 9 * 60 + 40
+    entry_close_min: int = 15 * 60 + 15
+    cooldown_min: int = 3
+
+    # --- multi-factor confirmation (optional, off by default) ---
+    use_multifactor: bool = False
+    vote_threshold: float = 0.15
+
+
+def _analyzer_technical(p: AnalyzerParams, ltp, open_, high, low, change, momentum_5m, prices, pivots):
+    ema_fast = _ema(prices, p.ema_fast_period) if prices else None
+    ema_slow = _ema(prices, p.ema_slow_period) if prices else None
+    have_enough_data = len(prices) >= p.min_ticks_for_noisy_signals
+    rsi = _rsi(prices, p.rsi_period) if (prices and have_enough_data) else None
+    macd = _analyzer_macd(prices, p.macd_fast, p.macd_slow, p.macd_signal) if prices else {"histogram": None}
+    day_range = max(high - low, 0.01)
+    vwap_proxy = (high + low + ltp) / 3 if ltp else 0
+
+    core = 0.0
+    if ltp and ema_fast:
+        core += p.ema_price_above_score if ltp > ema_fast else -p.ema_price_above_score
+    if ema_fast and ema_slow:
+        core += p.ema_cross_score if ema_fast > ema_slow else -p.ema_cross_score
+    if rsi is not None:
+        if p.rsi_bull_low <= rsi <= p.rsi_bull_high:
+            core += p.rsi_bull_score
+        elif p.rsi_bear_low <= rsi <= p.rsi_bear_high:
+            core -= p.rsi_bear_score
+        elif rsi > p.rsi_overbought:
+            core -= p.rsi_overbought_score
+        elif rsi < p.rsi_oversold:
+            core += p.rsi_oversold_score
+    if macd.get("histogram") is not None:
+        core += p.macd_score if macd["histogram"] > 0 else -p.macd_score
+    if ltp > vwap_proxy:
+        core += p.vwap_score
+    elif ltp:
+        core -= p.vwap_score
+    if have_enough_data:
+        if ltp >= high - day_range * p.breakout_range_pct and change > 0:
+            core += p.breakout_score
+        if ltp <= low + day_range * p.breakout_range_pct and change < 0:
+            core -= p.breakout_score
+        if momentum_5m > p.momentum_threshold_pct:
+            core += p.momentum_score
+        elif momentum_5m < -p.momentum_threshold_pct:
+            core -= p.momentum_score
+
+    pivot_score = 0.0
+    if pivots and ltp:
+        levels = sorted([pivots["s3"], pivots["s2"], pivots["s1"], pivots["pivot"],
+                          pivots["r1"], pivots["r2"], pivots["r3"]])
+        res_above = min([lv for lv in levels if lv > ltp], default=None)
+        sup_below = max([lv for lv in levels if lv < ltp], default=None)
+        tolerance = max(day_range * p.pivot_tolerance_range_pct, ltp * p.pivot_tolerance_price_pct) if ltp else 0
+        near_res = res_above is not None and (res_above - ltp) <= tolerance
+        near_sup = sup_below is not None and (ltp - sup_below) <= tolerance
+        broke_res = res_above is not None and ltp > res_above + tolerance * 0.3
+        broke_sup = sup_below is not None and ltp < sup_below - tolerance * 0.3
+        if near_res and not broke_res:
+            pivot_score -= p.pivot_reject_score
+        if near_sup and not broke_sup:
+            pivot_score += p.pivot_reject_score
+        if have_enough_data:
+            if broke_res and momentum_5m > 0:
+                pivot_score += p.pivot_breakout_score
+            if broke_sup and momentum_5m < 0:
+                pivot_score -= p.pivot_breakout_score
+
+    score = _clamp(core + pivot_score, -1.0, 1.0)
+    data_quality = min(100, 25 + len(prices) * 3)
+    confidence = int(_clamp(abs(score) * 100 * 0.75 + data_quality * 0.25, 0, 100))
+    return {"technical_score": score, "confidence": confidence, "core_score": core, "pivot_score": pivot_score}
+
+
+def _analyzer_regime(p: AnalyzerParams, vix, change):
+    score = 0.0
+    if vix >= p.vix_high_threshold:
+        score += p.vix_high_score
+    if abs(change) >= p.change_threshold_pct:
+        score += p.change_score if change > 0 else -p.change_score
+    return _clamp(score, -1, 1)
+
+
+def _analyzer_composite(p: AnalyzerParams, technical, regime_score):
+    composite = technical["technical_score"] * p.technical_weight + regime_score * p.regime_weight
+    confidence = int(_clamp(
+        technical["confidence"] * p.technical_weight + abs(regime_score) * 100 * p.regime_weight + 10,
+        0, 100
+    ))
+    composite = _clamp(composite, -1.0, 1.0)
+    if confidence < p.min_confidence or abs(composite) < p.composite_threshold:
+        action = "WAIT"
+    elif composite > 0:
+        action = "BUY_CE"
+    else:
+        action = "BUY_PE"
+
+    if p.use_multifactor and action != "WAIT":
+        composite_sign = 1 if composite > 0 else -1
+        votes = []
+        if abs(technical.get("core_score", 0)) >= p.vote_threshold:
+            votes.append(1 if technical["core_score"] > 0 else -1)
+        if abs(technical.get("pivot_score", 0)) >= 0.01:
+            votes.append(1 if technical["pivot_score"] > 0 else -1)
+        if abs(regime_score) >= 0.01:
+            votes.append(1 if regime_score > 0 else -1)
+        agreeing = sum(1 for v in votes if v == composite_sign)
+        if len(votes) < 2 or agreeing < 2:
+            action = "WAIT"
+    return action, composite, confidence
+
+
+def _analyzer_bs_price(S, K, T, sigma, r, opt_type):
+    if T <= 0 or sigma <= 0:
+        return max(0.0, S - K if opt_type == "CE" else K - S)
+    d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    def N(x):
+        return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+    if opt_type == "CE":
+        return max(0.0, S * N(d1) - K * math.exp(-r * T) * N(d2))
+    return max(0.0, K * math.exp(-r * T) * N(-d2) - S * N(-d1))
+
+
+@app.post("/analyzer/backtest")
+async def analyzer_backtest(p: AnalyzerParams):
+    """Runs the fully-parameterized backtest against real Yahoo Finance data,
+    for the interactive tuner UI. Read-only, no session/order/risk interaction —
+    safe to call repeatedly while experimenting with parameters."""
+    interval_minutes = {"5m": 5, "15m": 15, "30m": 30, "60m": 60, "1h": 60}.get(p.interval, 15)
+    bar_years = interval_minutes / (60 * 24 * 365)
+    cooldown_bars = max(1, math.ceil(p.cooldown_min / interval_minutes))
+
+    async with httpx.AsyncClient(timeout=20) as c:
+        bars, err = await _yahoo_intraday_bars(c, p.instrument, p.days_back, p.interval)
+        if err:
+            return {"success": False, "error": f"index fetch: {err}"}
+        daily_bars, derr = await _yahoo_intraday_bars(c, p.instrument, p.days_back + 5, "1d")
+        vix_daily, verr = await _yahoo_intraday_bars(c, "VIX", p.days_back + 5, "1d")
+    if not bars:
+        return {"success": False, "error": "no bars returned"}
+
+    vix_by_date = {}
+    for b in (vix_daily or []):
+        d = datetime.fromtimestamp(b["t"], _ist_now().tzinfo).date()
+        vix_by_date[d] = b["close"]
+    daily_by_date = {}
+    for b in (daily_bars or []):
+        d = datetime.fromtimestamp(b["t"], _ist_now().tzinfo).date()
+        daily_by_date[d] = b
+    sorted_dates = sorted(daily_by_date.keys())
+    prev_day_map = {}
+    for i, d in enumerate(sorted_dates):
+        if i == 0:
+            continue
+        prev_day_map[d] = daily_by_date[sorted_dates[i - 1]]
+
+    trades = []
+    prices_by_day, day_hl = {}, {}
+    cooldown_until, open_trade = 0, None
+
+    for i, bar in enumerate(bars):
+        dt = datetime.fromtimestamp(bar["t"], _ist_now().tzinfo)
+        d = dt.date()
+        mins = dt.hour * 60 + dt.minute
+        ltp = bar["close"]
+        prices_by_day.setdefault(d, []).append(ltp)
+        oh = day_hl.setdefault(d, {"open": bar["open"], "high": bar["high"], "low": bar["low"]})
+        oh["high"] = max(oh["high"], bar["high"]); oh["low"] = min(oh["low"], bar["low"])
+
+        if open_trade:
+            bars_elapsed = i - open_trade["entry_i"]
+            remaining_dte = max(0.0001, open_trade["dte"] - bars_elapsed * bar_years)
+            cur_vix = vix_by_date.get(d, open_trade["iv"] * 100) / 100
+            cur_premium = _analyzer_bs_price(ltp, open_trade["strike"], remaining_dte, cur_vix, 0.06, open_trade["side"])
+            hit_tp = cur_premium >= open_trade["tp_premium"]
+            hit_sl = cur_premium <= open_trade["sl_premium"]
+            if hit_tp or hit_sl or remaining_dte <= 0.0001:
+                result = "WIN" if hit_tp and not hit_sl else "LOSS" if hit_sl else ("WIN" if cur_premium >= open_trade["entry_premium"] else "LOSS")
+                pnl_pct = (cur_premium - open_trade["entry_premium"]) / open_trade["entry_premium"] * 100
+                trades.append({**open_trade, "exit_premium": cur_premium, "result": result,
+                               "pnl_pct": pnl_pct, "exit_time": dt.isoformat()})
+                open_trade = None
+                cooldown_until = i + cooldown_bars
+
+        if open_trade or i < cooldown_until:
+            continue
+        if mins < p.entry_open_min or mins >= p.entry_close_min or dt.weekday() >= 5:
+            continue
+
+        prev = prev_day_map.get(d)
+        pivots = _pivot_levels(prev["high"], prev["low"], prev["close"]) if prev else None
+        vix = vix_by_date.get(d, 15.0)
+        open_ = oh["open"]
+        change = (ltp - open_) / open_ * 100 if open_ else 0
+        prev_close = prices_by_day[d][-2] if len(prices_by_day[d]) >= 2 else ltp
+        momentum_5m = (ltp - prev_close) / prev_close * 100 if prev_close else 0
+        prices_window = prices_by_day[d][-120:]
+
+        technical = _analyzer_technical(p, ltp, open_, oh["high"], oh["low"], change, momentum_5m, prices_window, pivots)
+        regime_score = _analyzer_regime(p, vix, change)
+        action, composite, confidence = _analyzer_composite(p, technical, regime_score)
+        if action == "WAIT":
+            continue
+
+        side = "CE" if action == "BUY_CE" else "PE"
+        strike = round(ltp / 50) * 50
+        days_to_tue = (1 - dt.weekday()) % 7
+        dte = max(0.5, days_to_tue) / 365
+        iv = vix / 100
+        entry_premium = _analyzer_bs_price(ltp, strike, dte, iv, 0.06, side)
+        if entry_premium < 0.5:
+            continue
+        open_trade = {
+            "entry_time": dt.isoformat(), "side": side, "strike": strike, "dte": dte, "iv": iv,
+            "entry_index": ltp, "entry_premium": entry_premium,
+            "tp_premium": entry_premium * (1 + p.tp_pct / 100),
+            "sl_premium": entry_premium * (1 - p.sl_pct / 100),
+            "confidence": confidence, "composite": composite, "entry_i": i,
+        }
+
+    if not trades:
+        return {"success": True, "trades": 0, "message": "No trades fired with these parameters — try lowering min_confidence or composite_threshold."}
+    wins = [t for t in trades if t["result"] == "WIN"]
+    losses = [t for t in trades if t["result"] == "LOSS"]
+    win_rate = len(wins) / len(trades) * 100
+    avg_pnl = sum(t["pnl_pct"] for t in trades) / len(trades)
+    ce_count = len([t for t in trades if t["side"] == "CE"])
+    pe_count = len([t for t in trades if t["side"] == "PE"])
+    return {
+        "success": True,
+        "bars_fetched": len(bars),
+        "total_trades": len(trades),
+        "wins": len(wins), "losses": len(losses),
+        "win_probability": round(win_rate, 1),
+        "avg_pnl_pct": round(avg_pnl, 3),
+        "ce_trades": ce_count, "pe_trades": pe_count,
+        "sample_trades": [
+            {"time": t["entry_time"], "side": t["side"], "strike": t["strike"],
+             "entry": round(t["entry_premium"], 2), "exit": round(t["exit_premium"], 2),
+             "result": t["result"], "pnl_pct": round(t["pnl_pct"], 2)}
+            for t in trades[:15]
+        ],
+    }
