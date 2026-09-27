@@ -590,6 +590,53 @@ async def _ohlc_via_yahoo(c: httpx.AsyncClient, instrument: str):
 # the previous trading day's true H/L/C once per day, not on every quote poll.
 _prev_day_ohlc_cache: dict[str, dict] = {}
 
+# In-memory hourly aggregation, keyed by instrument -> {"date": "YYYY-MM-DD",
+# "hours": {"09:15-10:15": {samples...}}}. Populated on every /signals/advanced
+# call (already firing every ~30s during live trading), so the hourly report
+# builds up automatically through the day with zero extra polling needed.
+_hourly_state: dict[str, dict] = {}
+
+def _hour_bucket_label(dt) -> str:
+    """NSE-session-aligned hourly buckets starting 09:15: 09:15-10:15,
+    10:15-11:15, ... last bucket 14:15-15:30 (session end, 75min)."""
+    session_start_min = 9 * 60 + 15
+    mins = dt.hour * 60 + dt.minute
+    offset = max(0, mins - session_start_min)
+    bucket_idx = offset // 60
+    b_start_min = session_start_min + bucket_idx * 60
+    b_end_min = min(b_start_min + 60, 15 * 60 + 30)
+    def fmt(m):
+        return f"{m // 60:02d}:{m % 60:02d}"
+    return f"{fmt(b_start_min)}-{fmt(b_end_min)}"
+
+def _record_hourly_sample(instrument: str, md: dict, technical: dict, regime: dict,
+                           composite: float, confidence: int, action: str) -> None:
+    now = _ist_now()
+    today = now.strftime("%Y-%m-%d")
+    inst = instrument.upper()
+    state = _hourly_state.setdefault(inst, {"date": today, "hours": {}})
+    if state["date"] != today:
+        state["date"] = today
+        state["hours"] = {}
+    bucket = _hour_bucket_label(now)
+    h = state["hours"].setdefault(bucket, {
+        "nifty_values": [], "nifty_highs": [], "nifty_lows": [],
+        "vix_values": [], "technical_scores": [], "confidences": [],
+        "composites": [], "actions": [],
+    })
+    ltp = float(md.get("ltp") or 0)
+    if ltp > 0:
+        h["nifty_values"].append(ltp)
+        h["nifty_highs"].append(float(md.get("high") or ltp))
+        h["nifty_lows"].append(float(md.get("low") or ltp))
+    vix = float(md.get("vix") or 0)
+    if vix > 0:
+        h["vix_values"].append(vix)
+    h["technical_scores"].append(technical.get("technical_score", 0))
+    h["confidences"].append(confidence)
+    h["composites"].append(composite)
+    h["actions"].append(action)
+
 async def _prev_day_hlc_via_yahoo(c: httpx.AsyncClient, instrument: str):
     """Fetches the PREVIOUS completed trading day's real high/low/close — needed for
     classic floor-trader pivot support/resistance levels. _ohlc_via_yahoo only gives
@@ -1589,23 +1636,24 @@ def _market_regime_score(md: dict, technical: dict) -> dict:
     change = float(md.get("change") or 0)
     score = 0.0
     reasons = []
+    # High VIX -> bearish directional push, restored at user's explicit request
+    # (their view: elevated VIX in Indian markets tends to coincide with
+    # downside/PE outcomes). Low VIX intentionally has NO directional effect —
+    # that was the earlier bug (a near-constant bullish nudge, since India VIX
+    # sits under 13 most sessions) and stays fixed; this asymmetry (bearish lean
+    # on high VIX, neutral on low VIX) is a deliberate choice, not an oversight.
     if vix >= 22:
-        score -= 0.25; reasons.append("high_vix_avoid_option_buying")
-    elif vix <= 13:
-        # Previously added +0.10 here treating "calm market" as a bullish signal —
-        # that's a category error (low VIX means low expected volatility, not a
-        # directional bias) and, since India VIX sits well under 13 most sessions,
-        # it was adding a near-constant bullish nudge to every single signal
-        # regardless of actual price action. No score effect now — still logged
-        # for visibility, since low VIX does mean an option premium is priced
-        # cheaply relative to a big move, which is informational, not directional.
-        reasons.append("low_vix_stable_no_directional_bias")
+        score -= 0.25
+        reasons.append("high_vix_bearish_lean")
     else:
-        reasons.append("normal_vix")
+        reasons.append("normal_or_low_vix_no_directional_bias")
     if abs(change) >= 0.35:
         score += 0.10 if change > 0 else -0.10
         reasons.append("index_direction_confirmed")
-    return {"score": round(_clamp(score, -1, 1), 3), "vix": vix, "reasons": reasons}
+    else:
+        reasons.append("no_confirmed_move_yet")
+    return {"score": round(_clamp(score, -1, 1), 3), "vix": vix,
+            "confidence_penalty": 0.0, "reasons": reasons}
 
 
 @app.post("/signals/advanced")
@@ -1629,10 +1677,14 @@ async def advanced_signal(req: AdvancedSignalRequest):
     # actually fresh, relevant coverage; on a genuine no-news read it drops out
     # entirely rather than contributing noise.
     have_news = int(news.get("usable_count") or 0) > 0
-    # VIX still has no standalone directional term here — that was a separate,
-    # confirmed bug (a constant +0.01 bullish nudge on nearly every computation,
-    # since India VIX sits under 20 almost all the time). VIX still affects things
-    # via regime["score"] (the >=22 high-vix caution penalty) and confidence.
+    # VIX no longer has any standalone DIRECTIONAL term — the earlier low-VIX
+    # bullish bug and the high-VIX bearish penalty (fixed above, in
+    # _market_regime_score) were the same category error: treating volatility
+    # magnitude as if it were directional information. VIX now only affects
+    # confidence, via regime["confidence_penalty"] — genuine caution about
+    # buying expensive/volatile premiums, applied symmetrically to both
+    # BUY_CE and BUY_PE rather than pushing toward one side.
+    conf_penalty = regime.get("confidence_penalty", 0.0)
     if have_news:
         composite = (
             technical["technical_score"] * 0.65 +
@@ -1643,7 +1695,7 @@ async def advanced_signal(req: AdvancedSignalRequest):
             technical["confidence"] * 0.65 +
             news["confidence"] * 0.20 +
             abs(regime["score"]) * 100 * 0.15 +
-            10,
+            10 - conf_penalty,
             0, 100
         ))
     else:
@@ -1654,7 +1706,7 @@ async def advanced_signal(req: AdvancedSignalRequest):
         confidence = int(_clamp(
             technical["confidence"] * 0.85 +
             abs(regime["score"]) * 100 * 0.15 +
-            10,
+            10 - conf_penalty,
             0, 100
         ))
 
@@ -1673,6 +1725,11 @@ async def advanced_signal(req: AdvancedSignalRequest):
     if not risk_ok:
         action = "BLOCKED_BY_RISK"
         option_side = None
+
+    try:
+        _record_hourly_sample(req.instrument, md, technical, regime, composite, confidence, action)
+    except Exception as e:
+        logger.warning(f"hourly sample recording failed (non-fatal): {e}")
 
     return {
         "success": True,
@@ -1992,6 +2049,47 @@ class RiskSyncRequest(BaseModel):
 
 class RiskCheckRequest(BaseModel):
     required_margin: float = 0.0
+
+@app.get("/hourly/report")
+async def hourly_report_live(instrument: str = "NIFTY"):
+    """Live version of the backtest's hourly report — same shape/columns, built
+    up automatically from real /signals/advanced calls through the trading day
+    rather than replayed historical data. The current (in-progress) hour is
+    included with whatever samples have accumulated so far; it'll keep updating
+    as the day continues since the frontend just re-polls this."""
+    inst = instrument.upper()
+    state = _hourly_state.get(inst)
+    if not state or not state["hours"]:
+        return {"success": True, "date": _ist_now().strftime("%Y-%m-%d"), "instrument": inst, "rows": []}
+    rows = []
+    for bucket, h in sorted(state["hours"].items()):
+        if not h["nifty_values"]:
+            continue
+        nifty_open = h["nifty_values"][0]
+        nifty_close = h["nifty_values"][-1]
+        nifty_high = max(h["nifty_highs"]) if h["nifty_highs"] else nifty_close
+        nifty_low = min(h["nifty_lows"]) if h["nifty_lows"] else nifty_close
+        change_pct = (nifty_close - nifty_open) / nifty_open * 100 if nifty_open else 0
+        vix_start = h["vix_values"][0] if h["vix_values"] else None
+        vix_end = h["vix_values"][-1] if h["vix_values"] else None
+        vix_momentum_pct = ((vix_end - vix_start) / vix_start * 100) if (vix_start and vix_end) else None
+        avg_tech = sum(h["technical_scores"]) / len(h["technical_scores"]) if h["technical_scores"] else 0
+        last_conf = h["confidences"][-1] if h["confidences"] else 0
+        last_composite = h["composites"][-1] if h["composites"] else 0
+        last_action = h["actions"][-1] if h["actions"] else "WAIT"
+        rows.append({
+            "hour": bucket,
+            "nifty_open": round(nifty_open, 2), "nifty_close": round(nifty_close, 2),
+            "nifty_high": round(nifty_high, 2), "nifty_low": round(nifty_low, 2),
+            "nifty_change_pct": round(change_pct, 3),
+            "vix_start": round(vix_start, 2) if vix_start else None,
+            "vix_end": round(vix_end, 2) if vix_end else None,
+            "vix_momentum_pct": round(vix_momentum_pct, 3) if vix_momentum_pct is not None else None,
+            "technical_score": round(avg_tech, 3),
+            "confidence": last_conf, "composite": last_composite, "lean": last_action,
+            "samples": len(h["nifty_values"]),
+        })
+    return {"success": True, "date": state["date"], "instrument": inst, "rows": rows}
 
 @app.get("/risk/state")
 async def risk_state():
@@ -2353,7 +2451,11 @@ async def _select_affordable_option(
             if not leg or not leg.get("p_symbol"):
                 continue
             ltp, err = await _ltp_via_script_details(c, sess, leg["p_symbol"], fo_seg)
-            lot_size = int(leg.get("lot_size") or (20 if instrument == "SENSEX" else 75))
+            lot_size = int(leg.get("lot_size") or (20 if instrument == "SENSEX" else 65))
+            # NIFTY fallback corrected from stale 75 -> 65 (confirmed current real
+            # lot size from actual Kotak position data). This only applies if the
+            # scrip master's own iLotSize field is somehow missing — the dynamic
+            # value from leg.get("lot_size") is preferred and used whenever available.
             ltp = float(ltp or 0)
             per_lot_cost = round(ltp * lot_size, 2) if ltp > 0 else 0.0
             affordable = bool(ltp >= min_option_ltp and per_lot_cost > 0 and per_lot_cost <= budget)
