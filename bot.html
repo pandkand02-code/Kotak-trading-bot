@@ -530,6 +530,7 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
           <button class="btn btn-b btn-sm" onclick="testQuoteAPI()">TEST QUOTE</button>
           <button class="btn btn-r btn-sm" onclick="testKotakOrder()">TEST ORDER</button>
           <button class="btn btn-sm" style="color:var(--gold);border-color:var(--gold)" onclick="testMcxChain()">TEST MCX CHAIN</button>
+          <button class="btn btn-sm" style="color:#8b5cf6;border-color:#8b5cf6" onclick="testHistoricalData()">TEST HISTORICAL DATA</button>
           <button class="btn btn-sm" style="color:var(--dim);border-color:var(--dim)" onclick="clrLog()">CLEAR</button>
         </div>
       </div>
@@ -558,6 +559,7 @@ const G = {
   orderAuthVerified:false,
   liveAutoTrade:false,
   debugBypassWindow:false,
+  telegramSummaryDate:null,  // 'YYYY-MM-DD' of the last date a daily summary was sent
   lastEntryTs:    0,
   maxConcurrent:  3,
   minConfidence:  70,
@@ -695,6 +697,25 @@ async function testMcxChain(){
   }catch(e){ log('MCX chain preview test failed: '+e.message,'error'); }
 }
 
+async function testHistoricalData(){
+  if(!G.sid){log('Login first.','warn');return;}
+  log('DIAGNOSTIC: trying Kotak historical candle endpoint (a few request shapes)...','info');
+  try{
+    const res = await api('/test/historical_data',{session_id:G.sid, instrument:G.inst, days_back:5, resolution:'5'});
+    if(!res.attempts){ log('Unexpected response: '+JSON.stringify(res).substring(0,300),'error'); return; }
+    res.attempts.forEach(a=>{
+      if(a.error){
+        log(`✗ ${a.label} → ERROR: ${a.error}`,'error');
+      } else if(a.status_code===200){
+        log(`✓ ${a.label} → HTTP 200: ${a.body_snippet}`,'success');
+      } else {
+        log(`✗ ${a.label} → HTTP ${a.status_code}: ${a.body_snippet}`,'warn');
+      }
+    });
+    log('If any attempt above shows HTTP 200 with real candle data, tell me which label — that confirms the working format.','info');
+  }catch(e){ log('Historical data test failed: '+e.message,'error'); }
+}
+
 async function testKotakOrder(){
   if(!G.sid){log('Login first.','warn');return;}
   if(!confirm('Place a 1-lot BUY LIMIT @ safety limit price and immediately cancel? This tests connectivity.')) return;
@@ -766,6 +787,15 @@ async function api(path,body={},method='POST'){
   return r.json();
 }
 
+function notifyTelegram(text){
+  // Fire-and-forget — never let a Telegram hiccup affect trading. Silently no-ops
+  // server-side if TELEGRAM_BOT_TOKEN/CHAT_ID aren't configured on the droplet.
+  fetch(BASE+'/notify/telegram',{
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({text})
+  }).catch(()=>{});
+}
+
 async function chkServer(){
   try{
     await api('/health',{},'GET');
@@ -789,6 +819,39 @@ async function fetchRateStatus(){
   }catch{}
 }
 setInterval(fetchRateStatus, 10000);
+
+function _todayIST(){
+  return new Date().toLocaleString('en-CA',{timeZone:'Asia/Kolkata'}).slice(0,10); // 'YYYY-MM-DD'
+}
+
+function checkDailyTelegramSummary(){
+  const mins = _istMins();
+  if(mins < 15*60+30) return; // only fire at/after 15:30 IST market close
+  const today = _todayIST();
+  let lastSent = G.telegramSummaryDate;
+  try{ lastSent = lastSent || localStorage.getItem('nexus_tg_summary_date'); }catch(_){}
+  if(lastSent === today) return; // already sent today
+  G.telegramSummaryDate = today;
+  try{ localStorage.setItem('nexus_tg_summary_date', today); }catch(_){}
+
+  const closed = G.done.filter(t=>!t.isPaper);
+  const wins = closed.filter(t=>t.status==='WIN').length;
+  const losses = closed.filter(t=>t.status==='LOSS').length;
+  const totalPnl = closed.reduce((s,t)=>s+(t.pnl||0),0);
+  const winRate = closed.length ? Math.round((wins/closed.length)*100) : 0;
+  const lines = closed.map(t=>
+    `• ${t.symbol} ${t.status} ₹${(t.pnl||0).toFixed(0)}`
+  ).join('\n') || '(no live trades today)';
+
+  notifyTelegram(
+    `📊 <b>DAILY SUMMARY — ${today}</b>\n`+
+    `Trades: ${closed.length} | Wins: ${wins} | Losses: ${losses} | Win rate: ${winRate}%\n`+
+    `Net P&L: ₹${totalPnl.toFixed(0)}\n\n`+
+    lines
+  );
+  log('📊 Daily Telegram summary sent for '+today,'info');
+}
+setInterval(checkDailyTelegramSummary, 60000);
 
 async function doS1(){
   const t=document.getElementById('accTok').value.trim();
@@ -897,12 +960,47 @@ async function fetchPos(){
     const d=await api('/positions',{session_id:G.sid});
     if(d?.data){
       log('Positions: '+d.data.length+' entries','info');
-      // TEMPORARY DIAGNOSTIC: dump the raw shape of Kotak's own position data so we
-      // can identify its real P&L field names (rlPnl/urPnl/mtm/etc. — unconfirmed)
-      // and wire the displayed P&L to Kotak's actual numbers instead of the bot's
-      // own internal, pre-charges estimate. Remove this once fixed.
-      if(d.data.length > 0){
-        log('RAW POSITION SAMPLE: '+JSON.stringify(d.data[0]).substring(0,600),'info');
+      // Real P&L, sourced directly from Kotak's own position amounts. Confirmed
+      // exact match against the Kotak app's own displayed P&L: sellAmt - buyAmt.
+      // This replaces the bot's own internal entry/exit-price tracking, which was
+      // shown to diverge significantly (₹-845 bot estimate vs ₹-1,885 real Kotak
+      // P&L for the same day's trades on one contract) — likely because limit-
+      // order fills differ from the price recorded at signal-time, and the
+      // internal estimate never subtracted brokerage/STT/GST.
+      let realizedTotal = 0;
+      let hasOpenLegs = false;
+      d.data.forEach(p=>{
+        const buyAmt  = parseFloat(p.buyAmt  || 0);
+        const sellAmt = parseFloat(p.sellAmt || 0);
+        const flBuyQty  = parseFloat(p.flBuyQty  || 0);
+        const flSellQty = parseFloat(p.flSellQty || 0);
+        realizedTotal += (sellAmt - buyAmt);
+        // If a leg is still open (flBuyQty != flSellQty), sellAmt-buyAmt mixes
+        // realized P&L with the open portion's cost basis — flag as approximate
+        // until Kotak reports it fully squared (sqrFlg 'Y' / matched quantities).
+        if(flBuyQty !== flSellQty) hasOpenLegs = true;
+      });
+      G.realPnl = realizedTotal;
+      G.realPnlApprox = hasOpenLegs;
+      const pnlEl = document.getElementById('sPnl');
+      if(pnlEl){
+        pnlEl.textContent = '₹'+(realizedTotal>=0?'+':'')+realizedTotal.toFixed(0)+(hasOpenLegs?'*':'');
+        pnlEl.style.color = realizedTotal>=0 ? 'var(--green)' : 'var(--red)';
+        pnlEl.title = hasOpenLegs
+          ? 'Includes an open leg — approximate until fully squared off'
+          : 'Real P&L from Kotak (matches broker app)';
+      }
+      // Sync this real number to the risk engine so the 20%/30% caps evaluate
+      // against actual Kotak P&L, not the client's own (less accurate) estimate.
+      if(G.sid){
+        try{
+          const rs = await api('/risk/sync',{realised_pnl: realizedTotal});
+          const st = rs.state || {};
+          if(st.halted && G.botOn){
+            log('🛑 RISK ENGINE HALTED (real P&L sync): '+st.halted_reason,'error');
+            stopBot();
+          }
+        }catch(_){}
       }
     }
   }catch{}
@@ -940,7 +1038,13 @@ function _istDOW(){
   return ist.getUTCDay();
 }
 
-const ENTRY_OPEN_MIN  = 9*60 + 30;
+const ENTRY_OPEN_MIN  = 9*60 + 40;  // was 9:30 — added a post-open settle-in buffer
+                                     // since the first ~25min after open (9:15) tends to
+                                     // have the widest spreads/choppiest price action of
+                                     // the day, which was whipsawing entries almost
+                                     // instantly (3 same-strike losses in 8 minutes, each
+                                     // closing in under 90 seconds — classic opening-chop
+                                     // stop-out pattern, not a real directional move).
 const ENTRY_CLOSE_MIN = 15*60 + 15;  // aligned with backend's _entry_window_status() cutoff
 const AUTO_EXIT_MIN   = 15*60 + 20;
 
@@ -1571,6 +1675,15 @@ async function exitT(trade,res,ex){
   G.done.push({...trade,exitPrice:ex.toFixed(2),pnl,status:res,exitOrdNo,exitTime:new Date().toLocaleTimeString('en-IN',{hour12:false})});
   G.pnl+=pnl;
   log(`${res==='WIN'?'✓ TARGET':'✗ SL HIT'}: ${trade.symbol} | Exit ₹${ex.toFixed(2)} | P&L ₹${pnl.toFixed(0)}`,res==='WIN'?'success':'error');
+  if(!trade.isPaper){
+    notifyTelegram(
+      `${res==='WIN'?'🟢':'🔴'} <b>EXIT (${res})</b>\n`+
+      `${trade.symbol}\n`+
+      `Entry: ₹${trade.entryPrice} → Exit: ₹${ex.toFixed(2)}\n`+
+      `Qty: ${trade.qty} | P&L: ₹${pnl.toFixed(0)}\n`+
+      `Order#: ${exitOrdNo || 'n/a'}`
+    );
+  }
   render(); stats();
 
   if(G.sid){
@@ -1583,6 +1696,7 @@ async function exitT(trade,res,ex){
       }
     }catch(e){}
     fetchWallet();
+    fetchPos();  // refresh real P&L promptly after a trade closes
   }
 }
 
@@ -1603,8 +1717,15 @@ function render(){
 function stats(){
   const wins=G.done.filter(t=>t.status==='WIN').length;
   const wr=G.done.length?Math.round(wins/G.done.length*100):null;
-  document.getElementById('sPnl').textContent='₹'+(G.pnl>=0?'+':'')+G.pnl.toFixed(0);
-  document.getElementById('sPnl').style.color=G.pnl>=0?'var(--green)':'var(--red)';
+  // Prefer the real Kotak-sourced P&L (set by fetchPos()) once available — it's
+  // confirmed to match the broker app exactly. Fall back to the bot's own
+  // internal estimate only before the first successful /positions fetch (e.g.
+  // right at startup), since that estimate is known to diverge from the real
+  // number (doesn't include brokerage/STT/GST, and can differ from actual fills).
+  const displayPnl = (typeof G.realPnl === 'number') ? G.realPnl : G.pnl;
+  const approxFlag = G.realPnlApprox ? '*' : '';
+  document.getElementById('sPnl').textContent='₹'+(displayPnl>=0?'+':'')+displayPnl.toFixed(0)+approxFlag;
+  document.getElementById('sPnl').style.color=displayPnl>=0?'var(--green)':'var(--red)';
   document.getElementById('sTrades').textContent=G.done.length;
   document.getElementById('sWin').textContent=wr!==null?wr+'%':'—';
   document.getElementById('sWin').style.color=wr>=60?'var(--green)':wr!==null&&wr<40?'var(--red)':'var(--gold)';
@@ -1907,6 +2028,14 @@ async function dispatchAutoTrade(){
         startMon(trade);
         render();
         log('Position registered for monitoring: '+trade.symbol+' TP:'+tp+' SL:'+sl,'info');
+        notifyTelegram(
+          `🟢 <b>ENTRY</b>\n`+
+          `${trade.symbol}\n`+
+          `Side: BUY ${trade.side} | Qty: ${trade.qty} (${trade.lots} lot${trade.lots===1?'':'s'})\n`+
+          `Entry: ₹${trade.entryPrice} | TP: ₹${trade.tp} | SL: ₹${trade.sl}\n`+
+          `Order#: ${trade.entryOrdNo || 'n/a'}\n`+
+          `Time: ${trade.entry} IST`
+        );
       }catch(regErr){
         log('⚠ Live order placed but failed to register for monitoring: '+regErr.message+
             ' — CHECK KOTAK DIRECTLY, this position has no automatic SL/TP.','error');
@@ -1922,19 +2051,18 @@ async function dispatchAutoTrade(){
 }
 
 async function fetchNews(){
+  // Previously this called /news/memory via POST, but that endpoint is GET-only —
+  // every single call 405'd, silently falling through to a fallback that read a
+  // 'count' field which doesn't exist on /news/sentiment's response either
+  // (real fields: usable_count, fresh_count, headlines[]). Net effect: the log
+  // always said "0 headlines" regardless of how much real news was actually
+  // found and being used in scoring — a pure display bug, not missing data.
   try{
-    const r = await api('/news/memory', {instrument: G.inst});
+    const r = await api('/news/sentiment', {instrument: G.inst});
     G.news = r;
-    const fresh = r.fresh_count ?? r.count ?? 0;
-    log('News memory — fresh '+fresh+' | score '+(r.sentiment_score ?? r.news_score ?? 0),'info');
+    log(`News — sentiment ${r.sentiment_score ?? 0} (${r.bias||'NA'}) | usable ${r.usable_count ?? 0} / fresh ${r.fresh_count ?? 0} headlines`,'info');
   }catch(e){
-    try{
-      const r = await api('/news/sentiment', {instrument: G.inst});
-      G.news = r;
-      log('News — sentiment '+(r.sentiment_score ?? 0)+' across '+(r.count ?? 0)+' headlines','info');
-    }catch(e2){
-      log('News fetch error: '+e2.message,'warn');
-    }
+    log('News fetch error: '+e.message,'warn');
   }
 }
 
