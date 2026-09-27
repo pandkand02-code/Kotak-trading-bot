@@ -177,21 +177,26 @@ def technical_from_bar(ltp, open_, high, low, vix, change, momentum_5m, prices, 
 
 
 def market_regime_score(vix, change):
-    """Faithful port of main.py's _market_regime_score() (post low-vix-bias fix)."""
+    """Faithful port of main.py's _market_regime_score() — high VIX pushes the
+    score bearish (-0.25) at user's explicit request; low VIX has no
+    directional effect (that asymmetry is intentional)."""
     score = 0.0
+    confidence_penalty = 0.0
     if vix >= 22:
         score -= 0.25
     if abs(change) >= 0.35:
         score += 0.10 if change > 0 else -0.10
-    return _clamp(score, -1, 1)
+    return _clamp(score, -1, 1), confidence_penalty
 
 
-def composite_signal(technical, regime_score):
-    """Faithful port of the current no-news composite formula (0.90/0.10 split) —
-    news isn't backtestable (no free historical headline archive), so this always
-    takes the 'no usable news' path, exactly as main.py does when usable_count==0."""
-    composite = technical["technical_score"] * 0.90 + regime_score * 0.10
-    confidence = int(_clamp(technical["confidence"] * 0.90 + abs(regime_score) * 100 * 0.10 + 10, 0, 100))
+def composite_signal(technical, regime_score, confidence_penalty):
+    """Faithful port of the current no-news composite formula (0.85/0.15 split,
+    matching main.py's have_news=False path) with the VIX confidence-penalty fix."""
+    composite = technical["technical_score"] * 0.85 + regime_score * 0.15
+    confidence = int(_clamp(
+        technical["confidence"] * 0.85 + abs(regime_score) * 100 * 0.15 + 10 - confidence_penalty,
+        0, 100
+    ))
     composite = _clamp(composite, -1.0, 1.0)
     if confidence < 60:
         action = "WAIT"
@@ -247,8 +252,144 @@ def fetch_yahoo_intraday(symbol, days_back, interval):
     return bars
 
 
+def fetch_yahoo_period(symbol, period1_ts, period2_ts, interval):
+    """Same as fetch_yahoo_intraday but bounded to an exact [period1, period2]
+    unix-timestamp window instead of 'last N days from now' — needed to target
+    one specific historical date precisely for the hourly report."""
+    sym = _YAHOO_SYM[symbol]
+    sym_enc = sym.replace("^", "%5E")
+    url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{sym_enc}"
+           f"?interval={interval}&period1={period1_ts}&period2={period2_ts}")
+    r = httpx.get(url, headers={"User-Agent": _YAHOO_UA, "Accept": "application/json"}, timeout=20)
+    r.raise_for_status()
+    data = r.json()
+    result = data["chart"]["result"][0]
+    ts = result["timestamp"]
+    quote = result["indicators"]["quote"][0]
+    bars = []
+    for i in range(len(ts)):
+        if quote["close"][i] is None:
+            continue
+        bars.append({
+            "t": ts[i],
+            "open": quote["open"][i], "high": quote["high"][i],
+            "low": quote["low"][i], "close": quote["close"][i],
+        })
+    return bars
+
+
 def fetch_yahoo_daily(symbol, days_back):
     return fetch_yahoo_intraday(symbol, days_back + 5, "1d")
+
+
+# ---------------------------------------------------------------------------
+# Single-day hourly report: for one historical trading day, buckets the session
+# into hourly windows (09:15-10:15, 10:15-11:15, ... aligned to NSE hours) and
+# reports, per hour: VIX momentum, index high/low/direction, and what the bot's
+# actual technical/composite scoring would have read at that hour's close.
+# Writes a CSV ("separate sheet") alongside printing a readable table.
+# ---------------------------------------------------------------------------
+
+def hourly_report(date_str, instrument="NIFTY", interval="5m", out_csv=None):
+    target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    day_start_dt = datetime(target_date.year, target_date.month, target_date.day, 9, 15, tzinfo=IST)
+    day_end_dt   = datetime(target_date.year, target_date.month, target_date.day, 15, 30, tzinfo=IST)
+    # Pad the fetch window by a day on each side — Yahoo's period1/period2 are
+    # UTC-based and intraday history windows can be finicky right at boundaries.
+    p1 = int((day_start_dt - timedelta(days=1)).timestamp())
+    p2 = int((day_end_dt + timedelta(days=1)).timestamp())
+
+    print(f"Fetching {instrument} and VIX intraday ({interval}) for {date_str}...")
+    idx_bars = [b for b in fetch_yahoo_period(instrument, p1, p2, interval)
+                if datetime.fromtimestamp(b["t"], IST).date() == target_date]
+    vix_bars = [b for b in fetch_yahoo_period("VIX", p1, p2, interval)
+                if datetime.fromtimestamp(b["t"], IST).date() == target_date]
+    print(f"  {instrument}: {len(idx_bars)} bars | VIX: {len(vix_bars)} bars")
+    if not idx_bars:
+        print(f"No {instrument} bars found for {date_str} — check it was a trading "
+              f"day and is within Yahoo's intraday history window (~60 days back).")
+        return
+
+    # Previous day's H/L/C for pivots (best-effort; not fatal if unavailable)
+    prev_window_start = int((day_start_dt - timedelta(days=6)).timestamp())
+    daily_bars = fetch_yahoo_period(instrument, prev_window_start, p1, "1d")
+    pivots = None
+    if daily_bars:
+        prev_bar = daily_bars[-1]
+        pivots = _pivot_levels(prev_bar["high"], prev_bar["low"], prev_bar["close"])
+
+    vix_by_ts = {b["t"]: b["close"] for b in vix_bars}
+
+    def vix_at_or_before(ts):
+        candidates = [v for t, v in vix_by_ts.items() if t <= ts]
+        return candidates[-1] if candidates else None
+
+    hours = []
+    cursor = day_start_dt
+    while cursor < day_end_dt:
+        hours.append((cursor, min(cursor + timedelta(hours=1), day_end_dt)))
+        cursor += timedelta(hours=1)
+
+    prices_so_far = []
+    rows = []
+    for h_start, h_end in hours:
+        h_start_ts, h_end_ts = h_start.timestamp(), h_end.timestamp()
+        bucket = [b for b in idx_bars if h_start_ts <= b["t"] < h_end_ts]
+        if not bucket:
+            continue
+        bucket_high = max(b["high"] for b in bucket)
+        bucket_low = min(b["low"] for b in bucket)
+        bucket_open = bucket[0]["open"]
+        bucket_close = bucket[-1]["close"]
+        idx_change_pct = (bucket_close - bucket_open) / bucket_open * 100 if bucket_open else 0
+
+        vix_start = vix_at_or_before(bucket[0]["t"]) or 15.0
+        vix_end = vix_at_or_before(bucket[-1]["t"]) or vix_start
+        vix_momentum_pct = (vix_end - vix_start) / vix_start * 100 if vix_start else 0
+
+        prices_so_far.extend([b["close"] for b in bucket])
+        day_open_so_far = idx_bars[0]["open"]
+        day_high_so_far = max(b["high"] for b in idx_bars if b["t"] <= bucket[-1]["t"])
+        day_low_so_far = min(b["low"] for b in idx_bars if b["t"] <= bucket[-1]["t"])
+        day_change_pct = (bucket_close - day_open_so_far) / day_open_so_far * 100 if day_open_so_far else 0
+        prev_close_for_mom = prices_so_far[-2] if len(prices_so_far) >= 2 else bucket_close
+        momentum_5m = (bucket_close - prev_close_for_mom) / prev_close_for_mom * 100 if prev_close_for_mom else 0
+
+        technical = technical_from_bar(bucket_close, day_open_so_far, day_high_so_far, day_low_so_far,
+                                        vix_end, day_change_pct, momentum_5m, prices_so_far[-120:], pivots)
+        regime_score, conf_penalty = market_regime_score(vix_end, day_change_pct)
+        action, composite, confidence = composite_signal(technical, regime_score, conf_penalty)
+
+        rows.append({
+            "hour": f"{h_start.strftime('%H:%M')}-{h_end.strftime('%H:%M')}",
+            "nifty_open": round(bucket_open, 2), "nifty_close": round(bucket_close, 2),
+            "nifty_high": round(bucket_high, 2), "nifty_low": round(bucket_low, 2),
+            "nifty_change_pct": round(idx_change_pct, 3),
+            "vix_start": round(vix_start, 2), "vix_end": round(vix_end, 2),
+            "vix_momentum_pct": round(vix_momentum_pct, 3),
+            "technical_score": round(technical["technical_score"], 3),
+            "confidence": confidence, "composite": composite, "lean": action,
+        })
+
+    print(f"\n{'='*100}")
+    print(f"HOURLY REPORT — {instrument} — {date_str}")
+    print(f"{'='*100}")
+    header = f"{'Hour':>11} | {'Nifty O':>9} {'Close':>9} {'High':>9} {'Low':>9} {'Chg%':>7} | {'VIX Start':>9} {'VIX End':>7} {'VIXmom%':>8} | {'Tech':>6} {'Conf':>4} {'Lean':>7}"
+    print(header)
+    print("-" * len(header))
+    for r in rows:
+        print(f"{r['hour']:>11} | {r['nifty_open']:>9} {r['nifty_close']:>9} {r['nifty_high']:>9} {r['nifty_low']:>9} "
+              f"{r['nifty_change_pct']:>+6.2f}% | {r['vix_start']:>9} {r['vix_end']:>7} {r['vix_momentum_pct']:>+7.2f}% | "
+              f"{r['technical_score']:>+5.2f} {r['confidence']:>4} {r['lean']:>7}")
+
+    if out_csv is None:
+        out_csv = f"hourly_report_{instrument}_{date_str}.csv"
+    import csv as _csv
+    with open(out_csv, "w", newline="") as f:
+        w = _csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else [])
+        w.writeheader()
+        w.writerows(rows)
+    print(f"\nSaved to {out_csv} — open in Excel/Google Sheets.")
 
 
 # ---------------------------------------------------------------------------
@@ -339,8 +480,8 @@ def run_backtest(instrument="NIFTY", days_back=60, interval="15m",
         prices_window = prices_by_day[d][-120:]
 
         technical = technical_from_bar(ltp, open_, oh["high"], oh["low"], vix, change, momentum_5m, prices_window, pivots)
-        regime = market_regime_score(vix, change)
-        action, composite, confidence = composite_signal(technical, regime)
+        regime_score, confidence_penalty = market_regime_score(vix, change)
+        action, composite, confidence = composite_signal(technical, regime_score, confidence_penalty)
 
         if action == "WAIT" or confidence < min_confidence:
             continue
@@ -398,5 +539,10 @@ if __name__ == "__main__":
     p.add_argument("--instrument", default="NIFTY")
     p.add_argument("--days", type=int, default=60)
     p.add_argument("--interval", default="15m")
+    p.add_argument("--single-day", default=None,
+                    help="YYYY-MM-DD: run the hourly report for one specific day instead of the multi-day trade backtest")
     args = p.parse_args()
-    run_backtest(instrument=args.instrument, days_back=args.days, interval=args.interval)
+    if args.single_day:
+        hourly_report(args.single_day, instrument=args.instrument, interval=args.interval)
+    else:
+        run_backtest(instrument=args.instrument, days_back=args.days, interval=args.interval)
