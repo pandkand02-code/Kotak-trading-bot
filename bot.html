@@ -245,6 +245,7 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
   <button class="tab"     onclick="gt('wallet')">WALLET</button>
   <button class="tab"     onclick="gt('orders')">ORDERS</button>
   <button class="tab"     onclick="gt('log')">LOG</button>
+  <button class="tab"     onclick="gt('hourly')">HOURLY</button>
 </div>
 
 <div class="content">
@@ -537,6 +538,41 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
       <div class="log-box" id="logBox"><div style="text-align:center;color:var(--dim);font-size:12px;padding:20px 0">No activity yet</div></div>
     </div>
   </div>
+  <!-- HOURLY -->
+  <div id="t-hourly" style="display:none">
+    <div class="card">
+      <div class="ch">
+        <span class="ct">Hourly Report — <span id="hourlyDate">today</span></span>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="btn btn-b btn-sm" onclick="fetchHourlyReport()">REFRESH</button>
+          <button class="btn btn-sm" style="color:var(--green);border-color:var(--green)" onclick="exportHourlyCSV()">EXPORT CSV</button>
+        </div>
+      </div>
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:12px;white-space:nowrap" id="hourlyTable">
+          <thead>
+            <tr style="color:var(--dim);text-align:left;border-bottom:1px solid var(--line)">
+              <th style="padding:6px 8px">Hour</th>
+              <th style="padding:6px 8px">Open</th>
+              <th style="padding:6px 8px">Close</th>
+              <th style="padding:6px 8px">High</th>
+              <th style="padding:6px 8px">Low</th>
+              <th style="padding:6px 8px">Chg%</th>
+              <th style="padding:6px 8px">VIX Start</th>
+              <th style="padding:6px 8px">VIX End</th>
+              <th style="padding:6px 8px">VIX mom%</th>
+              <th style="padding:6px 8px">Tech</th>
+              <th style="padding:6px 8px">Conf</th>
+              <th style="padding:6px 8px">Lean</th>
+            </tr>
+          </thead>
+          <tbody id="hourlyTbody">
+            <tr><td colspan="12" style="text-align:center;color:var(--dim);padding:20px">No data yet — open this tab during a trading session to start collecting.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
 
 </div>
 
@@ -550,7 +586,13 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
 <script>
 const BASE = window.location.origin;
 const CLAUDE = "https://api.anthropic.com/v1/messages";
-const LS = {NIFTY:75, SENSEX:20};
+const LS = {NIFTY:65, SENSEX:20};  // corrected from stale NIFTY:75 — confirmed
+                                     // current real lot size (65) from actual
+                                     // Kotak position data. Order placement no
+                                     // longer depends on this (uses the live
+                                     // resolve_strike lot_size instead) — this
+                                     // now only backs preview/display estimates
+                                     // and the rare no-session fallback.
 const G = {
   sid:null, spot:{NIFTY:0, SENSEX:0},
   _simSpot:{NIFTY:24350, SENSEX:80000},
@@ -570,9 +612,72 @@ const G = {
 const mon = {};
 
 function gt(n){
-  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('on',['signal','chain','wallet','orders','log'][i]===n));
-  ['signal','chain','wallet','orders','log'].forEach(t=>document.getElementById('t-'+t).style.display=t===n?'block':'none');
+  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('on',['signal','chain','wallet','orders','log','hourly'][i]===n));
+  ['signal','chain','wallet','orders','log','hourly'].forEach(t=>document.getElementById('t-'+t).style.display=t===n?'block':'none');
+  if(n==='hourly') fetchHourlyReport();
 }
+
+G.hourlyRows = [];
+
+async function fetchHourlyReport(){
+  try{
+    const r = await api('/hourly/report?instrument='+G.inst, {}, 'GET');
+    G.hourlyRows = r.rows || [];
+    document.getElementById('hourlyDate').textContent = r.date || 'today';
+    const tbody = document.getElementById('hourlyTbody');
+    if(!G.hourlyRows.length){
+      tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:var(--dim);padding:20px">No data yet — open this tab during a trading session to start collecting.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = G.hourlyRows.map(row => {
+      const chgColor = row.nifty_change_pct >= 0 ? 'var(--green)' : 'var(--red)';
+      const leanColor = row.lean === 'BUY_CE' ? 'var(--green)' : row.lean === 'BUY_PE' ? 'var(--red)' : 'var(--dim)';
+      return `<tr style="border-bottom:1px solid var(--line)">
+        <td style="padding:6px 8px">${row.hour}</td>
+        <td style="padding:6px 8px">${row.nifty_open}</td>
+        <td style="padding:6px 8px">${row.nifty_close}</td>
+        <td style="padding:6px 8px">${row.nifty_high}</td>
+        <td style="padding:6px 8px">${row.nifty_low}</td>
+        <td style="padding:6px 8px;color:${chgColor}">${row.nifty_change_pct>=0?'+':''}${row.nifty_change_pct}%</td>
+        <td style="padding:6px 8px">${row.vix_start ?? '-'}</td>
+        <td style="padding:6px 8px">${row.vix_end ?? '-'}</td>
+        <td style="padding:6px 8px">${row.vix_momentum_pct!=null?(row.vix_momentum_pct>=0?'+':'')+row.vix_momentum_pct+'%':'-'}</td>
+        <td style="padding:6px 8px">${row.technical_score>=0?'+':''}${row.technical_score}</td>
+        <td style="padding:6px 8px">${row.confidence}%</td>
+        <td style="padding:6px 8px;color:${leanColor};font-weight:600">${row.lean}</td>
+      </tr>`;
+    }).join('');
+  }catch(e){
+    log('Hourly report fetch failed: '+e.message,'error');
+  }
+}
+
+function exportHourlyCSV(){
+  if(!G.hourlyRows.length){ log('No hourly data to export yet.','warn'); return; }
+  const cols = ['hour','nifty_open','nifty_close','nifty_high','nifty_low','nifty_change_pct',
+                'vix_start','vix_end','vix_momentum_pct','technical_score','confidence','composite','lean'];
+  const csvLines = [cols.join(',')];
+  G.hourlyRows.forEach(row => {
+    csvLines.push(cols.map(c => row[c] ?? '').join(','));
+  });
+  const blob = new Blob([csvLines.join('\n')], {type:'text/csv'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `hourly_report_${G.inst}_${document.getElementById('hourlyDate').textContent}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  log('Hourly report exported as CSV.','success');
+}
+
+// Auto-refresh the hourly tab every 60s if it's the active tab, so it stays
+// current through the day without needing a manual click each time.
+setInterval(()=>{
+  const activeTab = document.querySelector('.tab.on');
+  if(activeTab && activeTab.textContent.trim()==='HOURLY') fetchHourlyReport();
+}, 60000);
 
 function log(msg,type='info'){
   const C={info:'var(--bright)',success:'var(--green)',warn:'var(--gold)',error:'var(--red)',trade:'var(--accent)'};
@@ -1502,7 +1607,6 @@ function chgLots(d){G.lots=Math.max(1,Math.min(10,G.lots+d));document.getElement
 async function placeOrder(side,rowOvr,lotsOverride){
   const row=rowOvr||G.selRow; if(!row){log('Select a strike.','warn');return;}
   const activeLots = lotsOverride || G.lots;
-  const qty=activeLots*LS[G.inst];
   const tid='T'+Date.now();
 
   let resolved = null;
@@ -1522,6 +1626,15 @@ async function placeOrder(side,rowOvr,lotsOverride){
   const realSymbol = resolved ? resolved.p_trd_symbol                 : (G.inst+row.strike+side);
   const pSymbol    = resolved ? resolved.p_symbol                     : null;
   const exchSeg    = resolved ? (resolved.exchange_segment || 'nse_fo'): (G.inst==='SENSEX'?'bse_fo':'nse_fo');
+  // Use the REAL lot size from resolve_strike's scrip-master lookup, not the
+  // hardcoded LS table below — that table went stale (NIFTY listed as 75, but
+  // the exchange's actual current lot size is 65 as of late 2026, confirmed
+  // from real Kotak position data). Using the wrong lot size here didn't just
+  // mis-display P&L, it sent the WRONG ORDER QUANTITY to Kotak on every manual
+  // trade. LS is now only a last-resort fallback for the rare case there's no
+  // session yet to resolve the real value from.
+  const lotSize = (resolved && resolved.lot_size) ? resolved.lot_size : LS[G.inst];
+  const qty = activeLots * lotSize;
   const tp = +(ltp*(1+parseFloat(document.getElementById('tpS').value)/100)).toFixed(2);
   const sl = +(ltp*(1-parseFloat(document.getElementById('slS').value)/100)).toFixed(2);
 
@@ -1544,7 +1657,7 @@ async function placeOrder(side,rowOvr,lotsOverride){
     log('🛑 LIVE TRADE BLOCKED — quote stream stale, refusing to act on old prices.','error');
   } else if(G.sid){
     try{
-      const res=await api('/orders/place',{session_id:G.sid,trading_symbol:realSymbol,transaction_type:'B',quantity:String(qty),order_type:'MKT',exchange_segment:exchSeg,product:'NRML',lot_size:LS[G.inst]});
+      const res=await api('/orders/place',{session_id:G.sid,trading_symbol:realSymbol,transaction_type:'B',quantity:String(qty),order_type:'MKT',exchange_segment:exchSeg,product:'NRML',lot_size:lotSize});
       log('STEP 4/5 Kotak responded — stat='+(res.stat||'?')+' stCode='+(res.stCode||'-')+' ordNo='+(res.nOrdNo||'-'),'info');
       if(res.stat==='Ok'){
         liveOrdNo = res.nOrdNo;
