@@ -110,7 +110,11 @@ def _pivot_levels(h, l, c):
 
 
 def technical_from_bar(ltp, open_, high, low, vix, change, momentum_5m, prices, pivots):
-    """Faithful port of main.py's _technical_from_market()."""
+    """Faithful port of main.py's _technical_from_market(), plus one addition:
+    pivot_score is now tracked SEPARATELY from the rest of the technical score
+    (not just summed in), so a multi-factor confirmation check can ask 'does the
+    pivot signal agree with the core technical signal' as an independent vote,
+    rather than only ever seeing them pre-blended into one number."""
     ema20 = _ema(prices, 20) if prices else None
     ema50 = _ema(prices, 50) if prices else None
     MIN_TICKS_FOR_NOISY_SIGNALS = 20
@@ -120,36 +124,37 @@ def technical_from_bar(ltp, open_, high, low, vix, change, momentum_5m, prices, 
     day_range = max(high - low, 0.01)
     vwap_proxy = (high + low + ltp) / 3 if ltp else 0
 
-    score = 0.0
+    core_score = 0.0
     if ltp and ema20:
-        score += 0.18 if ltp > ema20 else -0.18
+        core_score += 0.18 if ltp > ema20 else -0.18
     if ema20 and ema50:
-        score += 0.16 if ema20 > ema50 else -0.16
+        core_score += 0.16 if ema20 > ema50 else -0.16
     if rsi14 is not None:
         if 55 <= rsi14 <= 70:
-            score += 0.16
+            core_score += 0.16
         elif 30 <= rsi14 <= 45:
-            score -= 0.16
+            core_score -= 0.16
         elif rsi14 > 78:
-            score -= 0.10
+            core_score -= 0.10
         elif rsi14 < 22:
-            score += 0.10
+            core_score += 0.10
     if macd.get("histogram") is not None:
-        score += 0.14 if macd["histogram"] > 0 else -0.14
+        core_score += 0.14 if macd["histogram"] > 0 else -0.14
     if ltp > vwap_proxy:
-        score += 0.10
+        core_score += 0.10
     elif ltp:
-        score -= 0.10
+        core_score -= 0.10
     if have_enough_data:
         if ltp >= high - day_range * 0.06 and change > 0:
-            score += 0.14
+            core_score += 0.14
         if ltp <= low + day_range * 0.06 and change < 0:
-            score -= 0.14
+            core_score -= 0.14
         if momentum_5m > 0.20:
-            score += 0.10
+            core_score += 0.10
         elif momentum_5m < -0.20:
-            score -= 0.10
+            core_score -= 0.10
 
+    pivot_score = 0.0
     if pivots and ltp:
         levels = sorted([pivots["s3"], pivots["s2"], pivots["s1"], pivots["pivot"],
                           pivots["r1"], pivots["r2"], pivots["r3"]])
@@ -161,19 +166,20 @@ def technical_from_bar(ltp, open_, high, low, vix, change, momentum_5m, prices, 
         broke_resistance = resistance_above is not None and ltp > resistance_above + tolerance * 0.3
         broke_support    = support_below    is not None and ltp < support_below - tolerance * 0.3
         if near_resistance and not broke_resistance:
-            score -= 0.12
+            pivot_score -= 0.12
         if near_support and not broke_support:
-            score += 0.12
+            pivot_score += 0.12
         if have_enough_data:
             if broke_resistance and momentum_5m > 0:
-                score += 0.12
+                pivot_score += 0.12
             if broke_support and momentum_5m < 0:
-                score -= 0.12
+                pivot_score -= 0.12
 
-    score = _clamp(score, -1.0, 1.0)
+    score = _clamp(core_score + pivot_score, -1.0, 1.0)
     data_quality = min(100, 25 + len(prices) * 3)
     confidence = int(_clamp(abs(score) * 100 * 0.75 + data_quality * 0.25, 0, 100))
-    return {"technical_score": score, "confidence": confidence}
+    return {"technical_score": score, "confidence": confidence,
+            "core_score": core_score, "pivot_score": pivot_score}
 
 
 def market_regime_score(vix, change):
@@ -207,6 +213,40 @@ def composite_signal(technical, regime_score, confidence_penalty):
     else:
         action = "WAIT"
     return action, composite, confidence
+
+
+def composite_signal_multifactor(technical, regime_score, confidence_penalty, vote_threshold=0.15):
+    """EXPERIMENTAL: same composite/confidence gate as composite_signal(), plus a
+    second, independent requirement — at least 2 of 3 sub-signals (core technical,
+    pivot S/R, market regime) must agree in direction with the composite. Signals
+    that are essentially flat (near zero) abstain rather than vote either way, and
+    if fewer than 2 signals have a real opinion at all, the trade is skipped
+    (not enough independent confirmation to trust it either way).
+
+    This is a genuinely different filter from just raising the confidence
+    threshold: it asks whether independent pieces of evidence AGREE, not just
+    whether one blended number is large. That's the actual hypothesis being
+    tested here, and 60 days of real data will show whether it holds up."""
+    action, composite, confidence = composite_signal(technical, regime_score, confidence_penalty)
+    if action == "WAIT":
+        return action, composite, confidence, {"votes_for": 0, "votes_total": 0}
+
+    composite_sign = 1 if composite > 0 else -1
+    votes = []
+    core = technical.get("core_score", 0)
+    if abs(core) >= vote_threshold:
+        votes.append(1 if core > 0 else -1)
+    pivot = technical.get("pivot_score", 0)
+    if abs(pivot) >= 0.01:  # pivot contributions are discrete (0, ±0.12, ±0.24) — any nonzero counts
+        votes.append(1 if pivot > 0 else -1)
+    if abs(regime_score) >= 0.01:
+        votes.append(1 if regime_score > 0 else -1)
+
+    agreeing = sum(1 for v in votes if v == composite_sign)
+    vote_info = {"votes_for": agreeing, "votes_total": len(votes), "votes_raw": votes}
+    if len(votes) < 2 or agreeing < 2:
+        return "WAIT", composite, confidence, vote_info
+    return action, composite, confidence, vote_info
 
 
 def bs_price(S, K, T, sigma, r, opt_type):
@@ -398,7 +438,8 @@ def hourly_report(date_str, instrument="NIFTY", interval="5m", out_csv=None):
 
 def run_backtest(instrument="NIFTY", days_back=60, interval="15m",
                   min_confidence=60, sl_pct=3.5, tp_pct=3.0,
-                  entry_open_min=9 * 60 + 40, entry_close_min=15 * 60 + 15):
+                  entry_open_min=9 * 60 + 40, entry_close_min=15 * 60 + 15,
+                  multifactor=False):
     print(f"Fetching {days_back} days of {interval} bars for {instrument}...")
     bars = fetch_yahoo_intraday(instrument, days_back, interval)
     print(f"  got {len(bars)} bars")
@@ -481,7 +522,10 @@ def run_backtest(instrument="NIFTY", days_back=60, interval="15m",
 
         technical = technical_from_bar(ltp, open_, oh["high"], oh["low"], vix, change, momentum_5m, prices_window, pivots)
         regime_score, confidence_penalty = market_regime_score(vix, change)
-        action, composite, confidence = composite_signal(technical, regime_score, confidence_penalty)
+        if multifactor:
+            action, composite, confidence, votes = composite_signal_multifactor(technical, regime_score, confidence_penalty)
+        else:
+            action, composite, confidence = composite_signal(technical, regime_score, confidence_penalty)
 
         if action == "WAIT" or confidence < min_confidence:
             continue
@@ -508,7 +552,8 @@ def run_backtest(instrument="NIFTY", days_back=60, interval="15m",
         }
 
     print(f"\n{'='*60}")
-    print(f"BACKTEST RESULTS — {instrument}, {days_back} days, {interval} bars")
+    print(f"BACKTEST RESULTS — {instrument}, {days_back} days, {interval} bars"
+          f"{' [MULTI-FACTOR MODE]' if multifactor else ' [STANDARD MODE]'}")
     print(f"{'='*60}")
     print("⚠ SYNTHETIC OPTION PRICING (Black-Scholes from index+VIX) — no real")
     print("  bid-ask spread, freeze-qty, or slippage. Likely more optimistic")
@@ -539,10 +584,15 @@ if __name__ == "__main__":
     p.add_argument("--instrument", default="NIFTY")
     p.add_argument("--days", type=int, default=60)
     p.add_argument("--interval", default="15m")
+    p.add_argument("--min-confidence", type=int, default=60,
+                    help="Confidence threshold (0-100). Try 70/75/80 to see the raise-the-bar lever.")
+    p.add_argument("--multifactor", action="store_true",
+                    help="EXPERIMENTAL: require 2-of-3 independent signals (core technical, pivot, regime) to agree, on top of the normal confidence gate.")
     p.add_argument("--single-day", default=None,
                     help="YYYY-MM-DD: run the hourly report for one specific day instead of the multi-day trade backtest")
     args = p.parse_args()
     if args.single_day:
         hourly_report(args.single_day, instrument=args.instrument, interval=args.interval)
     else:
-        run_backtest(instrument=args.instrument, days_back=args.days, interval=args.interval)
+        run_backtest(instrument=args.instrument, days_back=args.days, interval=args.interval,
+                     min_confidence=args.min_confidence, multifactor=args.multifactor)
