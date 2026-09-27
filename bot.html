@@ -247,6 +247,7 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
   <button class="tab"     onclick="gt('log')">LOG</button>
   <button class="tab"     onclick="gt('hourly')">HOURLY</button>
   <button class="tab"     onclick="gt('analyzer')">ANALYZER</button>
+  <button class="tab"     onclick="gt('trend15')">15-MIN TREND</button>
 </div>
 
 <div class="content">
@@ -642,6 +643,62 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
     </div>
   </div>
 
+  <!-- 15-MIN TREND -->
+  <div id="t-trend15" style="display:none">
+    <div class="card" style="border:2px solid var(--accent)">
+      <div class="ch"><span class="ct">Overall Trend (from accumulated candles)</span></div>
+      <div style="display:flex;gap:0;text-align:center;padding:16px 8px">
+        <div style="flex:1;border-right:1px solid var(--line)">
+          <div style="color:var(--dim);font-size:11px;letter-spacing:1px">DAY TREND</div>
+          <div id="ovDayTrend" style="font-size:20px;font-weight:800;color:var(--dim)">—</div>
+          <div id="ovDayDetail" style="font-size:11px;color:var(--dim)">no data yet</div>
+        </div>
+        <div style="flex:1;border-right:1px solid var(--line)">
+          <div style="color:var(--dim);font-size:11px;letter-spacing:1px">LAST HOUR (4 candles)</div>
+          <div id="ovRecentTrend" style="font-size:20px;font-weight:800;color:var(--dim)">—</div>
+          <div id="ovRecentDetail" style="font-size:11px;color:var(--dim)">no data yet</div>
+        </div>
+        <div style="flex:1">
+          <div style="color:var(--dim);font-size:11px;letter-spacing:1px">HH/HL STRUCTURE</div>
+          <div id="ovStructTrend" style="font-size:20px;font-weight:800;color:var(--dim)">—</div>
+          <div id="ovStructDetail" style="font-size:11px;color:var(--dim)">no data yet</div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="ch">
+        <span class="ct">15-Minute Trend — <span id="trend15Date">today</span></span>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="btn btn-b btn-sm" onclick="fetchFifteenMinReport()">REFRESH</button>
+        </div>
+      </div>
+      <div style="text-align:center;color:var(--dim);font-size:12px;padding:6px 10px 0">
+        Builds up automatically while the bot is running — no separate analysis needed. Trend combines this window's actual price move with what the signal engine read during it.
+      </div>
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:12px;white-space:nowrap" id="trend15Table">
+          <thead>
+            <tr style="color:var(--dim);text-align:left;border-bottom:1px solid var(--line)">
+              <th style="padding:6px 8px">Window</th>
+              <th style="padding:6px 8px">Open</th>
+              <th style="padding:6px 8px">Close</th>
+              <th style="padding:6px 8px">High</th>
+              <th style="padding:6px 8px">Low</th>
+              <th style="padding:6px 8px">Chg%</th>
+              <th style="padding:6px 8px">Tech</th>
+              <th style="padding:6px 8px">Conf</th>
+              <th style="padding:6px 8px">Lean</th>
+              <th style="padding:6px 8px">TREND</th>
+            </tr>
+          </thead>
+          <tbody id="trend15Tbody">
+            <tr><td colspan="10" style="text-align:center;color:var(--dim);padding:20px">No data yet — open this tab during a trading session to start collecting.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <!-- FOOTER -->
@@ -680,9 +737,10 @@ const G = {
 const mon = {};
 
 function gt(n){
-  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('on',['signal','chain','wallet','orders','log','hourly','analyzer'][i]===n));
-  ['signal','chain','wallet','orders','log','hourly','analyzer'].forEach(t=>document.getElementById('t-'+t).style.display=t===n?'block':'none');
+  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('on',['signal','chain','wallet','orders','log','hourly','analyzer','trend15'][i]===n));
+  ['signal','chain','wallet','orders','log','hourly','analyzer','trend15'].forEach(t=>document.getElementById('t-'+t).style.display=t===n?'block':'none');
   if(n==='hourly') fetchHourlyReport();
+  if(n==='trend15') fetchFifteenMinReport();
 }
 
 G.hourlyRows = [];
@@ -745,7 +803,126 @@ function exportHourlyCSV(){
 setInterval(()=>{
   const activeTab = document.querySelector('.tab.on');
   if(activeTab && activeTab.textContent.trim()==='HOURLY') fetchHourlyReport();
-}, 60000);
+  if(activeTab && activeTab.textContent.trim()==='15-MIN TREND') fetchFifteenMinReport();
+}, 30000);
+
+G.trend15Rows = [];
+
+function _trendColor(trend){
+  if(trend==='UPTREND') return 'var(--green)';
+  if(trend==='DOWNTREND') return 'var(--red)';
+  if(trend==='WEAK_UP') return '#7fd99a';
+  if(trend==='WEAK_DOWN') return '#e08a8a';
+  if(trend==='MIXED') return 'var(--gold)';
+  return 'var(--dim)'; // SIDEWAYS
+}
+
+function _bullishBearishColor(label){
+  if(label==='BULLISH') return 'var(--green)';
+  if(label==='BEARISH') return 'var(--red)';
+  return 'var(--gold)'; // NEUTRAL / NO CLEAR STRUCTURE
+}
+
+// Three distinct ways to read the ACCUMULATED candles rather than trusting one
+// in isolation — the same idea traders use multi-candle confirmation for:
+//  1) Day trend: majority vote across every 15-min candle collected so far
+//  2) Recent trend: same vote, but only the last 4 candles (last hour) — more
+//     sensitive to what's happening right now than the full-day average
+//  3) HH/HL structure: classic Dow Theory — each candle making a higher high
+//     AND higher low than the one before it is a structurally confirmed
+//     uptrend (and the reverse for downtrend), not just "price went up once"
+function computeAccumulatedTrend(rows){
+  if(!rows || rows.length === 0){
+    ['ovDayTrend','ovRecentTrend','ovStructTrend'].forEach(id=>{
+      document.getElementById(id).textContent = '—';
+      document.getElementById(id).style.color = 'var(--dim)';
+    });
+    ['ovDayDetail','ovRecentDetail','ovStructDetail'].forEach(id=>document.getElementById(id).textContent = 'no data yet');
+    return;
+  }
+
+  function majorityVote(subset){
+    let up = 0, down = 0, neutral = 0;
+    subset.forEach(row => {
+      if(row.trend === 'UPTREND' || row.trend === 'WEAK_UP') up++;
+      else if(row.trend === 'DOWNTREND' || row.trend === 'WEAK_DOWN') down++;
+      else neutral++;
+    });
+    let label = 'NEUTRAL';
+    if(up > down && up > neutral) label = 'BULLISH';
+    else if(down > up && down > neutral) label = 'BEARISH';
+    return {label, up, down, neutral, total: subset.length};
+  }
+
+  // 1) Day trend — every candle collected so far
+  const day = majorityVote(rows);
+  document.getElementById('ovDayTrend').textContent = day.label;
+  document.getElementById('ovDayTrend').style.color = _bullishBearishColor(day.label);
+  document.getElementById('ovDayDetail').textContent = `${day.up} up / ${day.down} down / ${day.neutral} neutral (${day.total} candles)`;
+
+  // 2) Recent trend — last 4 candles (1 hour)
+  const recentSubset = rows.slice(-4);
+  const recent = majorityVote(recentSubset);
+  document.getElementById('ovRecentTrend').textContent = recent.label;
+  document.getElementById('ovRecentTrend').style.color = _bullishBearishColor(recent.label);
+  document.getElementById('ovRecentDetail').textContent = `${recent.up} up / ${recent.down} down / ${recent.neutral} neutral (${recent.total} candles)`;
+
+  // 3) Higher-highs/higher-lows structure across consecutive candle pairs
+  let hhHl = 0, lhLl = 0, mixed = 0;
+  for(let i = 1; i < rows.length; i++){
+    const prev = rows[i-1], cur = rows[i];
+    const higherHigh = cur.nifty_high > prev.nifty_high;
+    const higherLow = cur.nifty_low > prev.nifty_low;
+    const lowerHigh = cur.nifty_high < prev.nifty_high;
+    const lowerLow = cur.nifty_low < prev.nifty_low;
+    if(higherHigh && higherLow) hhHl++;
+    else if(lowerHigh && lowerLow) lhLl++;
+    else mixed++;
+  }
+  const structTotal = rows.length - 1;
+  let structLabel = 'NO CLEAR STRUCTURE';
+  if(structTotal > 0){
+    if(hhHl > lhLl && hhHl > mixed) structLabel = 'BULLISH';
+    else if(lhLl > hhHl && lhLl > mixed) structLabel = 'BEARISH';
+  }
+  document.getElementById('ovStructTrend').textContent = structLabel;
+  document.getElementById('ovStructTrend').style.color = _bullishBearishColor(structLabel==='NO CLEAR STRUCTURE'?'NEUTRAL':structLabel);
+  document.getElementById('ovStructDetail').textContent = structTotal > 0
+    ? `${hhHl} HH+HL / ${lhLl} LH+LL / ${mixed} mixed (${structTotal} pairs)`
+    : 'need at least 2 candles';
+}
+
+async function fetchFifteenMinReport(){
+  try{
+    const r = await api('/fifteenmin/report?instrument='+G.inst, {}, 'GET');
+    G.trend15Rows = r.rows || [];
+    document.getElementById('trend15Date').textContent = r.date || 'today';
+    computeAccumulatedTrend(G.trend15Rows);
+    const tbody = document.getElementById('trend15Tbody');
+    if(!G.trend15Rows.length){
+      tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--dim);padding:20px">No data yet — open this tab during a trading session to start collecting.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = G.trend15Rows.map(row => {
+      const chgColor = row.nifty_change_pct >= 0 ? 'var(--green)' : 'var(--red)';
+      const leanColor = row.lean === 'BUY_CE' ? 'var(--green)' : row.lean === 'BUY_PE' ? 'var(--red)' : 'var(--dim)';
+      return `<tr style="border-bottom:1px solid var(--line)">
+        <td style="padding:6px 8px">${row.bucket}</td>
+        <td style="padding:6px 8px">${row.nifty_open}</td>
+        <td style="padding:6px 8px">${row.nifty_close}</td>
+        <td style="padding:6px 8px">${row.nifty_high}</td>
+        <td style="padding:6px 8px">${row.nifty_low}</td>
+        <td style="padding:6px 8px;color:${chgColor}">${row.nifty_change_pct>=0?'+':''}${row.nifty_change_pct}%</td>
+        <td style="padding:6px 8px">${row.technical_score>=0?'+':''}${row.technical_score}</td>
+        <td style="padding:6px 8px">${row.confidence}%</td>
+        <td style="padding:6px 8px;color:${leanColor};font-weight:600">${row.lean}</td>
+        <td style="padding:6px 8px;color:${_trendColor(row.trend)};font-weight:700">${row.trend}</td>
+      </tr>`;
+    }).join('');
+  }catch(e){
+    log('15-min trend report fetch failed: '+e.message,'error');
+  }
+}
 
 function log(msg,type='info'){
   const C={info:'var(--bright)',success:'var(--green)',warn:'var(--gold)',error:'var(--red)',trade:'var(--accent)'};
