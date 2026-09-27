@@ -127,6 +127,47 @@ sessions: dict     = {}
 # exchange's own live-reported limit if a specific scrip's real cap differs from this).
 FREEZE_QTY_FALLBACK = {"NIFTY": 1800, "SENSEX": 1000, "BANKNIFTY": 900}
 
+# Telegram trade-notification bot. Set these as real environment variables on the
+# droplet (e.g. via pm2's env config or a .env loaded before startup) — do NOT
+# hardcode your real token/chat_id directly in this file if you ever share it or
+# push it somewhere public, since the token alone lets anyone post as your bot.
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+async def _send_telegram_message(text: str) -> dict:
+    """Fire-and-forget trade notification to Telegram. Silently no-ops (returns
+    ok:False with a clear reason) if the bot isn't configured yet, rather than
+    raising — a missing Telegram config should never block or crash a real trade."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return {"ok": False, "error": "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not configured"}
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(url, json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            })
+        data, err = safe_json(r)
+        if err or not (isinstance(data, dict) and data.get("ok")):
+            logger.warning(f"telegram send failed: http={r.status_code} body={(r.text or '')[:200]}")
+            return {"ok": False, "error": err or (data.get("description") if isinstance(data, dict) else "unknown")}
+        return {"ok": True}
+    except httpx.HTTPError as e:
+        logger.warning(f"telegram send transport error: {e}")
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+class TelegramNotifyRequest(BaseModel):
+    text: str
+
+@app.post("/notify/telegram")
+async def notify_telegram(req: TelegramNotifyRequest):
+    """Generic notification endpoint the frontend calls for entry/exit/daily-summary
+    messages, so all Telegram formatting logic can live in one place server-side."""
+    result = await _send_telegram_message(req.text)
+    return result
+
 SESSIONS_FILE = os.environ.get("SESSIONS_FILE", "sessions.json")
 SESSION_TTL_HOURS = int(os.environ.get("SESSION_TTL_HOURS", "20"))
 
@@ -885,11 +926,23 @@ NEWS_DB_FILE = os.environ.get("NEWS_DB_FILE", "news_memory.db")
 
 # Free near-live sources. Reality check: free RSS may publish late; the bot rejects
 # old items instead of pretending they are live. News is confirmation, not a trade trigger.
+# Each source is fetched independently and a failure on one doesn't affect the others
+# (see _fetch_free_news's try/except per source) — safe to add more candidates even
+# if a couple turn out to be blocked/rate-limited from this server's IP.
 _FREE_NEWS_SOURCES = [
     ("google_nifty", "https://news.google.com/rss/search?q=NIFTY%20OR%20SENSEX%20OR%20RBI%20OR%20FII%20OR%20DII%20when:15m&hl=en-IN&gl=IN&ceid=IN:en"),
     ("google_market", "https://news.google.com/rss/search?q=Indian%20stock%20market%20NSE%20BSE%20when:15m&hl=en-IN&gl=IN&ceid=IN:en"),
     ("et_markets", "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms"),
     ("business_standard", "https://www.business-standard.com/rss/markets-106.rss"),
+    # Added for broader coverage — check the LOG tab's news fetch errors after
+    # deploying to confirm which of these actually resolve from your server;
+    # some financial sites block generic/datacenter traffic inconsistently.
+    ("moneycontrol", "https://www.moneycontrol.com/rss/latestnews.xml"),
+    ("livemint_markets", "https://www.livemint.com/rss/markets"),
+    ("google_rbi", "https://news.google.com/rss/search?q=RBI%20monetary%20policy%20OR%20repo%20rate%20when:60m&hl=en-IN&gl=IN&ceid=IN:en"),
+    ("google_fii_dii", "https://news.google.com/rss/search?q=FII%20DII%20flows%20India%20markets%20when:30m&hl=en-IN&gl=IN&ceid=IN:en"),
+    ("google_global_cues", "https://news.google.com/rss/search?q=Dow%20Jones%20OR%20Nasdaq%20OR%20SGX%20Nifty%20Asian%20markets%20when:60m&hl=en-IN&gl=IN&ceid=IN:en"),
+    ("financial_express", "https://www.financialexpress.com/market/feed/"),
 ]
 
 _RELEVANCE_TERMS = {
@@ -1569,28 +1622,41 @@ async def advanced_signal(req: AdvancedSignalRequest):
     news = await _advanced_news_context(req.instrument)
     regime = _market_regime_score(md, technical)
 
-    # News weighting removed from the trading decision entirely (per user request —
-    # news sentiment was contributing little signal and, in practice, was still being
-    # blended in with weight 0.2 even on "0 headlines" reads, quietly dragging the
-    # composite score around). News is still fetched and returned in the response for
-    # visibility/debugging, but no longer affects composite_score, confidence, or action.
-    # VIX no longer contributes a standalone directional term here — it was
-    # `(0.10 if vix<20 else -0.10)*0.10`, which added a constant +0.01 bullish
-    # nudge to composite on essentially every computation (India VIX is under 20
-    # nearly all the time), quietly biasing every signal toward BUY_CE regardless
-    # of actual price action. VIX still affects things properly via regime["score"]
-    # (the >=22 high-vix caution penalty) and via confidence, just not as a
-    # constant directional push.
-    composite = (
-        technical["technical_score"] * 0.90 +
-        regime["score"] * 0.10
-    )
-    confidence = int(_clamp(
-        technical["confidence"] * 0.90 +
-        abs(regime["score"]) * 100 * 0.10 +
-        10,
-        0, 100
-    ))
+    # News reintegrated into the decision (previous removal was partly based on a
+    # misleading log line — the log always said "0 headlines" due to a display bug
+    # reading a nonexistent field, even when usable_count was genuinely > 0 server-
+    # side). The dynamic gate below is real: news only gets weight when there is
+    # actually fresh, relevant coverage; on a genuine no-news read it drops out
+    # entirely rather than contributing noise.
+    have_news = int(news.get("usable_count") or 0) > 0
+    # VIX still has no standalone directional term here — that was a separate,
+    # confirmed bug (a constant +0.01 bullish nudge on nearly every computation,
+    # since India VIX sits under 20 almost all the time). VIX still affects things
+    # via regime["score"] (the >=22 high-vix caution penalty) and confidence.
+    if have_news:
+        composite = (
+            technical["technical_score"] * 0.65 +
+            news["sentiment_score"] * 0.20 +
+            regime["score"] * 0.15
+        )
+        confidence = int(_clamp(
+            technical["confidence"] * 0.65 +
+            news["confidence"] * 0.20 +
+            abs(regime["score"]) * 100 * 0.15 +
+            10,
+            0, 100
+        ))
+    else:
+        composite = (
+            technical["technical_score"] * 0.85 +
+            regime["score"] * 0.15
+        )
+        confidence = int(_clamp(
+            technical["confidence"] * 0.85 +
+            abs(regime["score"]) * 100 * 0.15 +
+            10,
+            0, 100
+        ))
 
     composite = round(_clamp(composite, -1.0, 1.0), 3)
     if confidence < req.min_confidence or abs(composite) < 0.22:
@@ -1616,7 +1682,11 @@ async def advanced_signal(req: AdvancedSignalRequest):
         "confidence": confidence,
         "composite_score": composite,
         "min_confidence": req.min_confidence,
-        "weights": {"technical": 0.90, "news": 0.00, "market_regime": 0.10},
+        "weights": (
+            {"technical": 0.65, "news": 0.20, "market_regime": 0.15}
+            if have_news else
+            {"technical": 0.85, "news": 0.00, "market_regime": 0.15}
+        ),
         "technical": technical,
         "news": news,
         "market_regime": regime,
@@ -1748,6 +1818,83 @@ class MCXChainPreviewRequest(BaseModel):
     n_strikes: int = 5
     strike_step: float = 50.0
 
+class HistoricalDataTestRequest(BaseModel):
+    session_id: str
+    instrument: str = "NIFTY"
+    days_back: int = 5
+    resolution: str = "5"  # minutes, as a string per most broker historical APIs
+
+@app.post("/test/historical_data")
+async def test_historical_data(req: HistoricalDataTestRequest):
+    """DIAGNOSTIC ONLY — tries several plausible request shapes against Kotak's
+    historical candle endpoint (referenced in Kotak-Neo GitHub issues as
+    /charts/v1/scrip/history, though public documentation of its exact required
+    parameters wasn't available at the time this was written, and other
+    developers have reported unreliable/503 responses from it). This tries a
+    few reasonable variations and returns every attempt's raw result, so we can
+    see empirically what — if anything — actually works for this account,
+    rather than guessing blindly. Not wired into any trading logic."""
+    sess = get_session(req.session_id)
+    inst = req.instrument.upper()
+    if inst not in INSTRUMENT_TOKENS:
+        return {"success": False, "error": f"unknown instrument {inst}"}
+    meta = INSTRUMENT_TOKENS[inst]
+    token = meta["instrument_token"]
+    seg = meta["exchange_segment"]
+    now_ts = int(time.time())
+    from_ts = now_ts - req.days_back * 86400
+    base = sess["base_url"].rstrip("/")
+    headers = {"Auth": sess["session_token"], "Sid": sess["session_sid"], "neo-fin-key": NEO_FIN_KEY}
+    attempts = []
+
+    async def try_call(label, method, url, **kwargs):
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                if method == "GET":
+                    r = await c.get(url, headers=headers, **kwargs)
+                else:
+                    r = await c.post(url, headers=headers, **kwargs)
+            body_snippet = (r.text or "")[:500]
+            attempts.append({
+                "label": label, "method": method, "url": url,
+                "params_or_body": kwargs.get("params") or kwargs.get("json"),
+                "status_code": r.status_code,
+                "body_snippet": body_snippet,
+            })
+        except Exception as e:
+            attempts.append({
+                "label": label, "method": method, "url": url,
+                "params_or_body": kwargs.get("params") or kwargs.get("json"),
+                "error": f"{type(e).__name__}: {e}",
+            })
+
+    # Attempt 1: GET /charts/v1/scrip/history with query params (per the GitHub
+    # issue reference — path confirmed to exist, params unconfirmed)
+    await try_call(
+        "GET charts/v1/scrip/history (query params)", "GET",
+        f"{base}/charts/v1/scrip/history",
+        params={"exchange": seg, "token": token, "resolution": req.resolution,
+                "from": from_ts, "to": now_ts},
+    )
+    # Attempt 2: same path, POST with JSON body (some broker APIs of similar
+    # shape — Dhan, GoPocket — use POST with a body instead of GET query params)
+    await try_call(
+        "POST charts/v1/scrip/history (json body)", "POST",
+        f"{base}/charts/v1/scrip/history",
+        json={"exchange": seg, "token": token, "resolution": req.resolution,
+              "from": str(from_ts), "to": str(now_ts)},
+    )
+    # Attempt 3: symbol-name-based params instead of token, in case that's
+    # what's actually expected (mirrors how /quotes/ltp uses neo_symbol)
+    await try_call(
+        "GET charts/v1/scrip/history (symbol name)", "GET",
+        f"{base}/charts/v1/scrip/history",
+        params={"exchange": seg, "symbol": meta["neo_symbol"], "resolution": req.resolution,
+                "from": from_ts, "to": now_ts},
+    )
+    return {"instrument": inst, "token": token, "segment": seg, "attempts": attempts,
+            "note": "Diagnostic only. Look at status_code/body_snippet per attempt to see which (if any) actually returned candle data."}
+
 @app.post("/chain/mcx_preview")
 async def chain_mcx_preview(req: MCXChainPreviewRequest):
     """READ-ONLY preview of an MCX commodity options chain — no order placement
@@ -1840,6 +1987,9 @@ async def chain_mcx_preview(req: MCXChainPreviewRequest):
 class RiskBookRequest(BaseModel):
     pnl: float
 
+class RiskSyncRequest(BaseModel):
+    realised_pnl: float
+
 class RiskCheckRequest(BaseModel):
     required_margin: float = 0.0
 
@@ -1855,6 +2005,17 @@ async def risk_check(req: RiskCheckRequest):
 @app.post("/risk/book")
 async def risk_book(req: RiskBookRequest):
     risk_engine.book_trade(req.pnl)
+    return {"success": True, "state": risk_engine.state()}
+
+@app.post("/risk/sync")
+async def risk_sync(req: RiskSyncRequest):
+    """Authoritative P&L sync from Kotak's own real position data (sellAmt -
+    buyAmt, computed in fetchPos() and confirmed to match the Kotak app exactly).
+    Called periodically by the frontend after every /positions fetch — this is
+    now the sole source of truth for every P&L-based risk cap, replacing the
+    client-estimated per-trade pnl that /risk/book still uses only for trade-
+    count/streak bookkeeping."""
+    risk_engine.sync_realised_pnl(req.realised_pnl)
     return {"success": True, "state": risk_engine.state()}
 
 @app.post("/risk/reset_day")
@@ -2097,8 +2258,13 @@ def _entry_window_status(bypass: bool = False) -> dict:
     mins = now.hour * 60 + now.minute
     if now.weekday() >= 5:
         return {"allowed": False, "reason": "weekend - market closed", "ist": now.isoformat()}
-    if mins < 9 * 60 + 30:      
-        return {"allowed": False, "reason": "no entry before 09:30 IST", "ist": now.isoformat()}
+    if mins < 9 * 60 + 40:
+        # Was 09:30 — added a post-open settle-in buffer. The first ~25 minutes
+        # after open (09:15) tend to have the widest spreads and choppiest price
+        # action of the day; a real observed session showed 3 same-strike losses
+        # in 8 minutes, each closing in under 90 seconds — an opening-chop
+        # whipsaw pattern, not genuine directional moves being correctly called.
+        return {"allowed": False, "reason": "no entry before 09:40 IST (post-open settle-in buffer)", "ist": now.isoformat()}
     if mins >= 15 * 60 + 15:
         return {"allowed": False, "reason": "no entry after 15:15 IST", "ist": now.isoformat()}
     return {"allowed": True, "reason": "entry window ok", "ist": now.isoformat()}
