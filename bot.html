@@ -246,6 +246,7 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
   <button class="tab"     onclick="gt('orders')">ORDERS</button>
   <button class="tab"     onclick="gt('log')">LOG</button>
   <button class="tab"     onclick="gt('hourly')">HOURLY</button>
+  <button class="tab"     onclick="gt('analyzer')">ANALYZER</button>
 </div>
 
 <div class="content">
@@ -574,6 +575,73 @@ input[type=range]{padding:4px 0;background:transparent;border:none;margin-bottom
     </div>
   </div>
 
+  <!-- ANALYZER -->
+  <div id="t-analyzer" style="display:none">
+    <div class="card" style="border:2px solid var(--accent)">
+      <div class="ch"><span class="ct">Win / Loss Probability</span></div>
+      <div id="analyzerBanner" style="display:flex;gap:0;text-align:center;padding:16px 8px">
+        <div style="flex:1;border-right:1px solid var(--line)">
+          <div style="color:var(--dim);font-size:11px;letter-spacing:1px">WIN PROBABILITY</div>
+          <div id="anzWin" style="font-size:32px;font-weight:800;color:var(--dim)">—</div>
+        </div>
+        <div style="flex:1;border-right:1px solid var(--line)">
+          <div style="color:var(--dim);font-size:11px;letter-spacing:1px">LOSS PROBABILITY</div>
+          <div id="anzLoss" style="font-size:32px;font-weight:800;color:var(--dim)">—</div>
+        </div>
+        <div style="flex:1;border-right:1px solid var(--line)">
+          <div style="color:var(--dim);font-size:11px;letter-spacing:1px">TRADES</div>
+          <div id="anzTrades" style="font-size:32px;font-weight:800;color:var(--bright)">—</div>
+        </div>
+        <div style="flex:1">
+          <div style="color:var(--dim);font-size:11px;letter-spacing:1px">AVG P&L</div>
+          <div id="anzPnl" style="font-size:32px;font-weight:800;color:var(--dim)">—</div>
+        </div>
+      </div>
+      <div id="anzCePe" style="text-align:center;color:var(--dim);font-size:12px;padding-bottom:8px">Run an analysis to see results</div>
+    </div>
+
+    <div class="card">
+      <div class="ch">
+        <span class="ct">Data Window</span>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;padding:10px">
+        <label style="font-size:12px;color:var(--dim)">Instrument
+          <select id="anz_instrument" style="display:block;margin-top:4px">
+            <option value="NIFTY">NIFTY</option>
+            <option value="SENSEX">SENSEX</option>
+          </select>
+        </label>
+        <label style="font-size:12px;color:var(--dim)">Days back
+          <input type="number" id="anz_days_back" value="60" min="5" max="60" style="display:block;margin-top:4px;width:80px">
+        </label>
+        <label style="font-size:12px;color:var(--dim)">Interval
+          <select id="anz_interval" style="display:block;margin-top:4px">
+            <option value="5m">5m</option>
+            <option value="15m" selected>15m</option>
+            <option value="30m">30m</option>
+            <option value="60m">60m</option>
+          </select>
+        </label>
+        <label style="font-size:12px;color:var(--dim)">Multi-factor confirmation
+          <select id="anz_use_multifactor" style="display:block;margin-top:4px">
+            <option value="false" selected>Off</option>
+            <option value="true">On (2-of-3 must agree)</option>
+          </select>
+        </label>
+      </div>
+    </div>
+
+    <div id="analyzerFormContainer"></div>
+
+    <div class="card">
+      <div style="display:flex;gap:8px;padding:10px;flex-wrap:wrap">
+        <button class="btn btn-g" onclick="runAnalyzer()" id="anzRunBtn" style="flex:1;min-width:200px">▶ RUN ANALYSIS</button>
+        <button class="btn" style="color:var(--dim);border-color:var(--dim)" onclick="resetAnalyzerDefaults()">RESET TO DEFAULTS</button>
+      </div>
+      <div id="anzSampleTrades" style="padding:0 10px 10px;font-size:12px;color:var(--dim)"></div>
+    </div>
+  </div>
+
 </div>
 
 <!-- FOOTER -->
@@ -612,8 +680,8 @@ const G = {
 const mon = {};
 
 function gt(n){
-  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('on',['signal','chain','wallet','orders','log','hourly'][i]===n));
-  ['signal','chain','wallet','orders','log','hourly'].forEach(t=>document.getElementById('t-'+t).style.display=t===n?'block':'none');
+  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('on',['signal','chain','wallet','orders','log','hourly','analyzer'][i]===n));
+  ['signal','chain','wallet','orders','log','hourly','analyzer'].forEach(t=>document.getElementById('t-'+t).style.display=t===n?'block':'none');
   if(n==='hourly') fetchHourlyReport();
 }
 
@@ -957,6 +1025,167 @@ function checkDailyTelegramSummary(){
   log('📊 Daily Telegram summary sent for '+today,'info');
 }
 setInterval(checkDailyTelegramSummary, 60000);
+
+// ============================================================================
+// ANALYZER — dynamic parameter form + on-demand backtest runner.
+// Every constant from the live scoring pipeline (EMA/RSI/MACD/breakout/
+// momentum/pivot/regime/composite/thresholds/trade-management) is listed here
+// with the SAME default as main.py's AnalyzerParams, grouped for readability.
+// Rendered dynamically so adding a parameter later only means editing this list.
+// ============================================================================
+const ANALYZER_PARAM_GROUPS = [
+  { title: "EMA (Exponential Moving Average)", fields: [
+    {key:'ema_fast_period', label:'Fast EMA period', def:20, step:1},
+    {key:'ema_slow_period', label:'Slow EMA period', def:50, step:1},
+    {key:'ema_price_above_score', label:'Score: price vs fast EMA', def:0.18, step:0.01},
+    {key:'ema_cross_score', label:'Score: fast EMA vs slow EMA', def:0.16, step:0.01},
+  ]},
+  { title: "RSI (Relative Strength Index)", fields: [
+    {key:'rsi_period', label:'RSI period', def:14, step:1},
+    {key:'rsi_bull_low', label:'Bullish zone low', def:55, step:1},
+    {key:'rsi_bull_high', label:'Bullish zone high', def:70, step:1},
+    {key:'rsi_bull_score', label:'Score: bullish zone', def:0.16, step:0.01},
+    {key:'rsi_bear_low', label:'Bearish zone low', def:30, step:1},
+    {key:'rsi_bear_high', label:'Bearish zone high', def:45, step:1},
+    {key:'rsi_bear_score', label:'Score: bearish zone', def:0.16, step:0.01},
+    {key:'rsi_overbought', label:'Overbought level', def:78, step:1},
+    {key:'rsi_overbought_score', label:'Score: overbought', def:0.10, step:0.01},
+    {key:'rsi_oversold', label:'Oversold level', def:22, step:1},
+    {key:'rsi_oversold_score', label:'Score: oversold bounce', def:0.10, step:0.01},
+  ]},
+  { title: "MACD", fields: [
+    {key:'macd_fast', label:'Fast period', def:12, step:1},
+    {key:'macd_slow', label:'Slow period', def:26, step:1},
+    {key:'macd_signal', label:'Signal period', def:9, step:1},
+    {key:'macd_score', label:'Score: histogram sign', def:0.14, step:0.01},
+  ]},
+  { title: "VWAP Proxy", fields: [
+    {key:'vwap_score', label:'Score: price vs VWAP proxy', def:0.10, step:0.01},
+  ]},
+  { title: "Breakout & Momentum (needs min ticks below)", fields: [
+    {key:'min_ticks_for_noisy_signals', label:'Min ticks before trusting these', def:20, step:1},
+    {key:'breakout_range_pct', label:'Near-extreme zone (% of day range)', def:0.06, step:0.01},
+    {key:'breakout_score', label:'Score: breakout/breakdown', def:0.14, step:0.01},
+    {key:'momentum_threshold_pct', label:'Momentum threshold (%)', def:0.20, step:0.01},
+    {key:'momentum_score', label:'Score: momentum', def:0.10, step:0.01},
+  ]},
+  { title: "Pivot Support/Resistance", fields: [
+    {key:'pivot_tolerance_range_pct', label:'Tolerance (% of day range)', def:0.10, step:0.01},
+    {key:'pivot_tolerance_price_pct', label:'Tolerance (% of price)', def:0.0015, step:0.0001},
+    {key:'pivot_reject_score', label:'Score: near S/R rejection', def:0.12, step:0.01},
+    {key:'pivot_breakout_score', label:'Score: confirmed S/R break', def:0.12, step:0.01},
+  ]},
+  { title: "Market Regime (VIX / index move)", fields: [
+    {key:'vix_high_threshold', label:'High-VIX threshold', def:22, step:1},
+    {key:'vix_high_score', label:'Score: high VIX (negative = bearish)', def:-0.25, step:0.01},
+    {key:'change_threshold_pct', label:'Confirmed-move threshold (%)', def:0.35, step:0.01},
+    {key:'change_score', label:'Score: confirmed index move', def:0.10, step:0.01},
+  ]},
+  { title: "Composite Weights", fields: [
+    {key:'technical_weight', label:'Technical weight', def:0.85, step:0.05},
+    {key:'regime_weight', label:'Regime weight', def:0.15, step:0.05},
+  ]},
+  { title: "Decision Thresholds", fields: [
+    {key:'min_confidence', label:'Min confidence (0-100) to trade', def:60, step:1},
+    {key:'composite_threshold', label:'Min |composite score| to trade', def:0.22, step:0.01},
+  ]},
+  { title: "Trade Management", fields: [
+    {key:'sl_pct', label:'Stop loss (%)', def:3.5, step:0.5},
+    {key:'tp_pct', label:'Take profit (%)', def:3.0, step:0.5},
+    {key:'entry_open_min', label:'Entry window opens (mins from midnight IST)', def:580, step:5},
+    {key:'entry_close_min', label:'Entry window closes (mins from midnight IST)', def:915, step:5},
+    {key:'cooldown_min', label:'Cooldown after a trade (minutes)', def:3, step:1},
+  ]},
+  { title: "Multi-Factor Confirmation (only applies if enabled above)", fields: [
+    {key:'vote_threshold', label:'Min |core score| to count as a vote', def:0.15, step:0.01},
+  ]},
+];
+
+function renderAnalyzerForm(){
+  const container = document.getElementById('analyzerFormContainer');
+  container.innerHTML = ANALYZER_PARAM_GROUPS.map(group => `
+    <div class="card">
+      <div class="ch"><span class="ct">${group.title}</span></div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;padding:10px">
+        ${group.fields.map(f => `
+          <label style="font-size:11px;color:var(--dim)">${f.label}
+            <input type="number" id="anz_${f.key}" value="${f.def}" step="${f.step}"
+                   style="display:block;margin-top:4px;width:100%;background:var(--card2);color:var(--bright);border:1px solid var(--line);border-radius:4px;padding:4px 6px">
+          </label>
+        `).join('')}
+      </div>
+    </div>
+  `).join('');
+}
+renderAnalyzerForm();
+
+function resetAnalyzerDefaults(){
+  ANALYZER_PARAM_GROUPS.forEach(group => group.fields.forEach(f => {
+    const el = document.getElementById('anz_'+f.key);
+    if(el) el.value = f.def;
+  }));
+  document.getElementById('anz_instrument').value = 'NIFTY';
+  document.getElementById('anz_days_back').value = 60;
+  document.getElementById('anz_interval').value = '15m';
+  document.getElementById('anz_use_multifactor').value = 'false';
+  log('Analyzer parameters reset to live-bot defaults.','info');
+}
+
+function collectAnalyzerParams(){
+  const params = {
+    instrument: document.getElementById('anz_instrument').value,
+    days_back: parseInt(document.getElementById('anz_days_back').value),
+    interval: document.getElementById('anz_interval').value,
+    use_multifactor: document.getElementById('anz_use_multifactor').value === 'true',
+  };
+  ANALYZER_PARAM_GROUPS.forEach(group => group.fields.forEach(f => {
+    const el = document.getElementById('anz_'+f.key);
+    params[f.key] = parseFloat(el.value);
+  }));
+  return params;
+}
+
+async function runAnalyzer(){
+  const btn = document.getElementById('anzRunBtn');
+  btn.disabled = true; btn.textContent = '⏳ RUNNING... (fetching real data, may take 10-20s)';
+  document.getElementById('anzWin').textContent = '—';
+  document.getElementById('anzLoss').textContent = '—';
+  document.getElementById('anzTrades').textContent = '—';
+  document.getElementById('anzPnl').textContent = '—';
+  document.getElementById('anzCePe').textContent = 'Running...';
+  try{
+    const params = collectAnalyzerParams();
+    log('ANALYZER: running backtest with current parameters...','info');
+    const r = await api('/analyzer/backtest', params);
+    if(!r.success){
+      log('ANALYZER FAILED: '+(r.error||'unknown'),'error');
+      document.getElementById('anzCePe').textContent = 'Failed: '+(r.error||'unknown error');
+      return;
+    }
+    if(!r.total_trades){
+      document.getElementById('anzCePe').textContent = r.message || 'No trades fired with these parameters.';
+      log('ANALYZER: no trades fired — '+(r.message||''),'warn');
+      return;
+    }
+    const lossRate = 100 - r.win_probability;
+    document.getElementById('anzWin').textContent = r.win_probability+'%';
+    document.getElementById('anzWin').style.color = r.win_probability>=50?'var(--green)':'var(--red)';
+    document.getElementById('anzLoss').textContent = lossRate.toFixed(1)+'%';
+    document.getElementById('anzLoss').style.color = lossRate>50?'var(--red)':'var(--green)';
+    document.getElementById('anzTrades').textContent = r.total_trades;
+    document.getElementById('anzPnl').textContent = (r.avg_pnl_pct>=0?'+':'')+r.avg_pnl_pct+'%';
+    document.getElementById('anzPnl').style.color = r.avg_pnl_pct>=0?'var(--green)':'var(--red)';
+    document.getElementById('anzCePe').textContent = `${r.wins} wins / ${r.losses} losses | CE: ${r.ce_trades} · PE: ${r.pe_trades} | ${r.bars_fetched} bars analyzed | ⚠ synthetic Black-Scholes pricing, no real spread/slippage/freeze-qty`;
+    document.getElementById('anzSampleTrades').innerHTML = '<b>Sample trades (first 15):</b><br>' +
+      (r.sample_trades||[]).map(t=>`${t.time} ${t.side} strike=${t.strike} entry=₹${t.entry} exit=₹${t.exit} ${t.result} (${t.pnl_pct>=0?'+':''}${t.pnl_pct}%)`).join('<br>');
+    log(`ANALYZER: ${r.total_trades} trades | win prob ${r.win_probability}% | avg P&L ${r.avg_pnl_pct}%`,'success');
+  }catch(e){
+    log('ANALYZER error: '+e.message,'error');
+    document.getElementById('anzCePe').textContent = 'Error: '+e.message;
+  }finally{
+    btn.disabled = false; btn.textContent = '▶ RUN ANALYSIS';
+  }
+}
 
 async function doS1(){
   const t=document.getElementById('accTok').value.trim();
