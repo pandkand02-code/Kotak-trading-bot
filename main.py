@@ -669,6 +669,48 @@ def _record_hourly_sample(instrument: str, md: dict, technical: dict, regime: di
     h["composites"].append(composite)
     h["actions"].append(action)
 
+# 15-minute trend tracker — same live-aggregation pattern as the hourly one
+# above, just finer-grained, plus a computed "trend" classification per bucket
+# (price direction combined with the technical lean, not just raw numbers).
+_fifteen_min_state: dict[str, dict] = {}
+
+def _fifteen_min_bucket_label(dt) -> str:
+    """NSE-session-aligned 15-min buckets starting 09:15: 09:15-09:30,
+    09:30-09:45, ... last bucket ends at 15:30 (session close)."""
+    session_start_min = 9 * 60 + 15
+    mins = dt.hour * 60 + dt.minute
+    offset = max(0, mins - session_start_min)
+    bucket_idx = offset // 15
+    b_start_min = session_start_min + bucket_idx * 15
+    b_end_min = min(b_start_min + 15, 15 * 60 + 30)
+    def fmt(m):
+        return f"{m // 60:02d}:{m % 60:02d}"
+    return f"{fmt(b_start_min)}-{fmt(b_end_min)}"
+
+def _record_fifteen_min_sample(instrument: str, md: dict, technical: dict, regime: dict,
+                                composite: float, confidence: int, action: str) -> None:
+    now = _ist_now()
+    today = now.strftime("%Y-%m-%d")
+    inst = instrument.upper()
+    state = _fifteen_min_state.setdefault(inst, {"date": today, "buckets": {}})
+    if state["date"] != today:
+        state["date"] = today
+        state["buckets"] = {}
+    bucket = _fifteen_min_bucket_label(now)
+    b = state["buckets"].setdefault(bucket, {
+        "nifty_values": [], "nifty_highs": [], "nifty_lows": [],
+        "technical_scores": [], "confidences": [], "composites": [], "actions": [],
+    })
+    ltp = float(md.get("ltp") or 0)
+    if ltp > 0:
+        b["nifty_values"].append(ltp)
+        b["nifty_highs"].append(float(md.get("high") or ltp))
+        b["nifty_lows"].append(float(md.get("low") or ltp))
+    b["technical_scores"].append(technical.get("technical_score", 0))
+    b["confidences"].append(confidence)
+    b["composites"].append(composite)
+    b["actions"].append(action)
+
 async def _prev_day_hlc_via_yahoo(c: httpx.AsyncClient, instrument: str):
     """Fetches the PREVIOUS completed trading day's real high/low/close — needed for
     classic floor-trader pivot support/resistance levels. _ohlc_via_yahoo only gives
@@ -1762,6 +1804,10 @@ async def advanced_signal(req: AdvancedSignalRequest):
         _record_hourly_sample(req.instrument, md, technical, regime, composite, confidence, action)
     except Exception as e:
         logger.warning(f"hourly sample recording failed (non-fatal): {e}")
+    try:
+        _record_fifteen_min_sample(req.instrument, md, technical, regime, composite, confidence, action)
+    except Exception as e:
+        logger.warning(f"15-min sample recording failed (non-fatal): {e}")
 
     return {
         "success": True,
@@ -2120,6 +2166,60 @@ async def hourly_report_live(instrument: str = "NIFTY"):
             "technical_score": round(avg_tech, 3),
             "confidence": last_conf, "composite": last_composite, "lean": last_action,
             "samples": len(h["nifty_values"]),
+        })
+    return {"success": True, "date": state["date"], "instrument": inst, "rows": rows}
+
+@app.get("/fifteenmin/report")
+async def fifteen_min_report_live(instrument: str = "NIFTY"):
+    """Same live-aggregation idea as /hourly/report, but bucketed every 15
+    minutes and with a computed TREND classification per bucket — combines
+    price direction with the technical lean, rather than leaving you to read
+    raw numbers to figure out the trend yourself. Builds up automatically
+    through the day from the same /signals/advanced calls already firing."""
+    inst = instrument.upper()
+    state = _fifteen_min_state.get(inst)
+    if not state or not state["buckets"]:
+        return {"success": True, "date": _ist_now().strftime("%Y-%m-%d"), "instrument": inst, "rows": []}
+    rows = []
+    for bucket, b in sorted(state["buckets"].items()):
+        if not b["nifty_values"]:
+            continue
+        nifty_open = b["nifty_values"][0]
+        nifty_close = b["nifty_values"][-1]
+        nifty_high = max(b["nifty_highs"]) if b["nifty_highs"] else nifty_close
+        nifty_low = min(b["nifty_lows"]) if b["nifty_lows"] else nifty_close
+        change_pct = (nifty_close - nifty_open) / nifty_open * 100 if nifty_open else 0
+        avg_tech = sum(b["technical_scores"]) / len(b["technical_scores"]) if b["technical_scores"] else 0
+        last_conf = b["confidences"][-1] if b["confidences"] else 0
+        last_composite = b["composites"][-1] if b["composites"] else 0
+        last_action = b["actions"][-1] if b["actions"] else "WAIT"
+
+        # Trend classification: price direction (this bucket's actual move) vs.
+        # the technical lean (what the signal engine read during it). Agreement
+        # gives a confident UP/DOWN call; disagreement is flagged as MIXED
+        # rather than silently picking one side, since that disagreement is
+        # itself useful information (e.g. price ticked up on noise while the
+        # underlying technical picture stayed bearish).
+        price_dir = "UP" if change_pct > 0.03 else "DOWN" if change_pct < -0.03 else "FLAT"
+        tech_dir = "UP" if avg_tech > 0.05 else "DOWN" if avg_tech < -0.05 else "FLAT"
+        if price_dir == "FLAT" and tech_dir == "FLAT":
+            trend = "SIDEWAYS"
+        elif price_dir == tech_dir:
+            trend = f"{price_dir}TREND"
+        elif price_dir == "FLAT" or tech_dir == "FLAT":
+            trend = f"WEAK_{tech_dir if price_dir=='FLAT' else price_dir}"
+        else:
+            trend = "MIXED"
+
+        rows.append({
+            "bucket": bucket,
+            "nifty_open": round(nifty_open, 2), "nifty_close": round(nifty_close, 2),
+            "nifty_high": round(nifty_high, 2), "nifty_low": round(nifty_low, 2),
+            "nifty_change_pct": round(change_pct, 3),
+            "technical_score": round(avg_tech, 3),
+            "confidence": last_conf, "composite": last_composite, "lean": last_action,
+            "trend": trend,
+            "samples": len(b["nifty_values"]),
         })
     return {"success": True, "date": state["date"], "instrument": inst, "rows": rows}
 
